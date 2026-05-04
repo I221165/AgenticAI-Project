@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background-color: #0a0a0f;
+    color: #f1f5f9;
+    font-family: 'Manrope', sans-serif;
+    min-height: 100dvh;
+  }
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: #0a0a0f; }
+  ::-webkit-scrollbar-thumb { background: #1e1e2e; border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: #7c3aed; }
+  ::selection { background: rgba(124,58,237,0.4); color: white; }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-blue-400;
+  }
+  .text-gradient-gold {
+    @apply text-transparent bg-clip-text bg-gradient-to-r from-amber-400 to-orange-400;
+  }
+  .glass {
+    background: rgba(19, 19, 26, 0.8);
+    backdrop-filter: blur(12px);
+    border: 1px solid #1e1e2e;
+  }
+  .glass-bright {
+    background: rgba(30, 30, 46, 0.6);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(124,58,237,0.2);
+  }
+  .glow-violet {
+    box-shadow: 0 0 20px rgba(124,58,237,0.35), 0 0 60px rgba(124,58,237,0.1);
+  }
+  .glow-violet-sm {
+    box-shadow: 0 0 10px rgba(124,58,237,0.3);
+  }
+  .glow-blue {
+    box-shadow: 0 0 20px rgba(37,99,235,0.35);
+  }
+  .shimmer-bg {
+    background: linear-gradient(90deg,
+      rgba(124,58,237,0) 0%,
+      rgba(124,58,237,0.15) 50%,
+      rgba(124,58,237,0) 100%);
+    background-size: 200% 100%;
+    animation: shimmer 2s linear infinite;
+  }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}
+
+/* Material Symbols */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  font-family: 'Material Symbols Outlined';
+  font-style: normal;
+  user-select: none;
+}
+.icon-fill { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+
+/* Phase progress bar fill animation */
+@keyframes fillBar {
+  from { width: 0%; }
+  to   { width: var(--target-width, 100%); }
+}
+.fill-bar { animation: fillBar 1.2s cubic-bezier(0.4,0,0.2,1) forwards; }
+
+/* Scan line overlay */
+@keyframes scanLine {
+  0%   { transform: translateY(-100%); opacity: 0.6; }
+  100% { transform: translateY(100vh); opacity: 0; }
+}
+.scan-line {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(124,58,237,0.6), transparent);
+  animation: scanLine 4s linear infinite;
+  pointer-events: none; z-index: 9999;
+}
+
+/* Typing cursor */
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+.cursor-blink::after {
+  content: '|';
+  animation: blink 1s step-end infinite;
+  color: #7c3aed;
+}

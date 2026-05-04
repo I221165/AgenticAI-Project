@@ -1,0 +1,36 @@
+# Environment & secrets
+.env
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+
+# Run outputs (large generated artifacts — commit only docs/sample_output/)
+run_outputs/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
