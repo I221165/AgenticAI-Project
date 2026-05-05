@@ -190,23 +190,24 @@ export default function StudioPage() {
         const phase = d.phase
         const pct   = d.progress ?? 0
         const msg   = d.message  ?? ''
-        const done  = d.status === 'done' || d.status === 'error'
+        const isDone = d.status === 'done' || d.status === 'error'
 
-        if (phase === 5) {
-          if (d.status === 'running') { setEditActive(true); setEditPhaseNum(5); setEditPct(0); setEditMsg(msg) }
-          if (done) {
-            setEditPct(100); setEditMsg(done && d.status === 'error' ? '✗ ' + msg : '✓ Done')
-            setTimeout(() => { setEditActive(false); setRefreshKey(k => k + 1) }, 1200)
-          }
-        } else if (editActive || phase >= 2) {
-          // Sub-phase progress (Phase 2 audio, Phase 3 video) streaming inside an edit
+        if (isDone && phase === 5) {
+          // Edit complete — show 100% briefly then dismiss
+          setEditPct(100)
+          setEditMsg(d.status === 'error' ? '✗ ' + msg : '✓ Edit applied')
+          setTimeout(() => { setEditActive(false); setRefreshKey(k => k + 1) }, 1500)
+        } else if (!isDone) {
+          // Any running progress event (Phase 5 start, Phase 2/3 sub-steps) — always activate bar
+          // Note: no stale-closure check on editActive here; bar activates on ANY live event
+          setEditActive(true)
           setEditPhaseNum(phase)
           setEditPct(pct)
           setEditMsg(msg)
         }
       } catch { /* ignore malformed */ }
     }
-    ws.onerror = () => {}
+    ws.onerror = (err) => { console.warn('[StudioWS] error', err) }
     return () => { try { ws.close() } catch { /* ignore */ } }
   }, [runId]) // eslint-disable-line react-hooks/exhaustive-deps
 

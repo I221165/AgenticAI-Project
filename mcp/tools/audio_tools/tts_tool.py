@@ -86,7 +86,7 @@ class TTSTool(BaseAgenticTool):
         os.makedirs(output_dir, exist_ok=True)
 
         import hashlib
-        filename_hash = hashlib.md5(f"{character_name}_{emotion}_{text}".encode()).hexdigest()[:8]
+        filename_hash = hashlib.md5(f"{character_name}_{emotion}_{text}_{voice_personality}".encode()).hexdigest()[:8]
         ext = ".mp3" if provider in [3, 4] else ".wav"
         output_path = os.path.join(output_dir, f"{character_name.lower()}_{emotion.lower()}_{filename_hash}{ext}")
 
