@@ -381,6 +381,7 @@ class CreateRunRequest(BaseModel):
 
 class EditRequest(BaseModel):
     instruction: str
+    base_version: Optional[int] = None   # if set, restore this version before editing
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -636,7 +637,12 @@ async def edit_run(run_id: str, body: EditRequest, background_tasks: BackgroundT
     if not os.path.isdir(rdir) and run_id not in RUNS:
         raise HTTPException(404, "Run not found")
 
-    from state_manager.history import save_version
+    from state_manager.history import save_version, restore_version
+    # If editing from a specific version, restore it first so the edit
+    # branches from that point rather than from the latest live state
+    if body.base_version is not None:
+        restore_version(rdir, body.base_version)
+
     version_num = save_version(rdir, label=body.instruction[:40])
 
     from agents.edit_agent.intent_classifier import classify_intent
@@ -698,15 +704,34 @@ async def get_versions(run_id: str):
 
 @app.get("/api/runs/{run_id}/versions/{version}/video")
 async def serve_version_video(run_id: str, version: int):
-    """Serve the MP4 that was recorded in the version snapshot."""
+    """Serve the video for a version — prefers the local snapshot copy."""
+    rdir = _run_dir(run_id)
+    # Check for video stored inside the version folder first (new approach)
+    local_copy = os.path.join(rdir, "versions", f"v{version}", "video", "final_video.mp4")
+    if os.path.exists(local_copy):
+        return FileResponse(local_copy, media_type="video/mp4", filename=f"{run_id}_v{version}.mp4")
+    # Fall back to the recorded path (old snapshots without local copy)
     from state_manager.history import get_version_meta
-    meta = get_version_meta(_run_dir(run_id), version)
+    meta = get_version_meta(rdir, version)
     if not meta:
         raise HTTPException(404, f"Version {version} not found")
     vp = meta.get("video_path", "")
     if not vp or not os.path.exists(vp):
         raise HTTPException(404, f"Video for version {version} not found on disk")
     return FileResponse(vp, media_type="video/mp4", filename=f"{run_id}_v{version}.mp4")
+
+
+@app.get("/api/runs/{run_id}/versions/{version}/audio/{filepath:path}")
+async def serve_version_audio(run_id: str, version: int, filepath: str):
+    """Serve an audio file from a version snapshot."""
+    if ".." in filepath:
+        raise HTTPException(400, "Invalid path")
+    audio_path = os.path.join(_run_dir(run_id), "versions", f"v{version}", "audio", filepath)
+    if not os.path.exists(audio_path):
+        raise HTTPException(404, "Audio file not found in this version")
+    ext = os.path.splitext(filepath)[1].lower()
+    media_type = "audio/mpeg" if ext == ".mp3" else "audio/wav"
+    return FileResponse(audio_path, media_type=media_type)
 
 
 @app.get("/api/runs/{run_id}/versions/{version}/images/{filename}")
@@ -757,18 +782,43 @@ async def get_version_assets(run_id: str, version: int):
     script     = _load_json(os.path.join(ver_dir, "script.json"))
     story      = _load_json(os.path.join(ver_dir, "story.json"))
 
+    # Video: prefer local snapshot copy, fall back to recorded path
+    local_video = os.path.join(ver_dir, "video", "final_video.mp4")
+    has_video = os.path.exists(local_video) or (
+        meta.get("video_path") and os.path.exists(meta.get("video_path", ""))
+    )
+
+    # Audio: list mixed per-scene files and full audio track from snapshot
+    audio_files = []
+    audio_dir = os.path.join(ver_dir, "audio")
+    if os.path.isdir(audio_dir):
+        full_track = os.path.join(audio_dir, "full_audio.mp3")
+        if os.path.exists(full_track):
+            audio_files.append({
+                "type": "full",
+                "filename": "full_audio.mp3",
+                "url": f"/api/runs/{run_id}/versions/{version}/audio/full_audio.mp3",
+            })
+        mixed_dir = os.path.join(audio_dir, "mixed")
+        if os.path.isdir(mixed_dir):
+            for f in sorted(os.listdir(mixed_dir)):
+                if f.endswith(".mp3"):
+                    audio_files.append({
+                        "type": "mixed",
+                        "filename": f,
+                        "url": f"/api/runs/{run_id}/versions/{version}/audio/mixed/{f}",
+                    })
+
     return {
         "version":    version,
         "label":      meta.get("label", f"v{version}"),
         "saved_at":   meta.get("saved_at", ""),
-        "video_url":  (
-            f"/api/runs/{run_id}/versions/{version}/video"
-            if meta.get("video_path") and os.path.exists(meta["video_path"]) else None
-        ),
+        "video_url":  f"/api/runs/{run_id}/versions/{version}/video" if has_video else None,
         "images":     images,
         "characters": characters,
         "script":     script,
         "story":      story,
+        "audio":      audio_files,
     }
 
 

@@ -275,18 +275,21 @@ export default function StudioPage() {
     // Optimistic user bubble (backend persists it but hasn't responded yet)
     setOptimisticMsgs(prev => [...prev, { role: 'user', text: userMsg, ts: new Date().toISOString() }])
     try {
+      const editBody = { instruction: userMsg }
+      if (viewingVersion !== null) editBody.base_version = viewingVersion
       const res = await fetch(`/api/runs/${runId}/edit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instruction: userMsg }),
+        body: JSON.stringify(editBody),
       })
       const d    = res.ok ? await res.json() : null
       const intent = d?.intent?.type || 'edit'
       const vNum   = d?.version_saved || (versions[0]?.v ?? 0) + 1
+      const branchNote = viewingVersion !== null ? ` (branched from v${viewingVersion})` : ''
       // Optimistic AI "processing" bubble — replaced once BG task completes and we refresh
       setOptimisticMsgs(prev => [
         ...prev,
-        { role: 'ai', text: `Intent: **${intent}** → processing edit. Saved as v${vNum}.`, ts: new Date().toISOString() },
+        { role: 'ai', text: `Intent: **${intent}** → processing edit${branchNote}. Saved as v${vNum}.`, ts: new Date().toISOString() },
       ])
       setVersions(prev => [
         { v: vNum, label: userMsg.slice(0,35), time: 'Just now', current: true, videoUrl: null },
@@ -874,9 +877,8 @@ export default function StudioPage() {
                     <div className="flex items-center gap-3 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20">
                       <span className="material-symbols-outlined text-amber-400 text-[16px]">history</span>
                       <p className="text-amber-300 font-display font-bold text-[11px] flex-1">
-                        Browsing snapshot v{viewingVersion}
-                        {versionLoading ? ' — loading…' : ''}.
-                        Assets, script and characters shown are from this version.
+                        Browsing v{viewingVersion}{versionLoading ? ' — loading…' : ''}.
+                        Type an edit below to branch from this version.
                       </p>
                       <motion.button
                         whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }}

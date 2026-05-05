@@ -67,8 +67,8 @@ def _find_mp4(run_dir: str) -> Optional[str]:
 
 def save_version(run_dir: str, label: str = "") -> int:
     """
-    Copy current JSON state + images into versions/vN/.
-    Also records the current video path for before/after comparison.
+    Full snapshot of the current run state into versions/vN/:
+      JSON configs, images, audio (mixed + full track), and the video file.
     Returns version number.
     """
     import glob as _glob
@@ -77,13 +77,13 @@ def save_version(run_dir: str, label: str = "") -> int:
     dest = os.path.join(_versions_dir(run_dir), f"v{v}")
     os.makedirs(dest, exist_ok=True)
 
-    # Snapshot JSON config files
+    # 1. JSON config files
     for fname in _VERSIONED_FILES:
         src = os.path.join(run_dir, fname)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(dest, fname))
 
-    # Snapshot images (flat files: images/scene_1_wide.png …)
+    # 2. Images (flat: images/scene_1_wide.png …)
     img_src_dir = os.path.join(run_dir, "images")
     img_dst_dir = os.path.join(dest, "images")
     if os.path.isdir(img_src_dir):
@@ -92,11 +92,24 @@ def save_version(run_dir: str, label: str = "") -> int:
                         _glob.glob(os.path.join(img_src_dir, "*.jpg")):
             shutil.copy2(img_path, os.path.join(img_dst_dir, os.path.basename(img_path)))
 
+    # 3. Audio — copy full audio track + mixed per-scene files
+    audio_src = os.path.join(run_dir, "audio")
+    audio_dst = os.path.join(dest, "audio")
+    if os.path.isdir(audio_src):
+        shutil.copytree(audio_src, audio_dst, dirs_exist_ok=True)
+
+    # 4. Video — copy the actual MP4 file into the version folder
+    mp4 = _find_mp4(run_dir)
+    if mp4 and os.path.exists(mp4):
+        video_dst = os.path.join(dest, "video")
+        os.makedirs(video_dst, exist_ok=True)
+        shutil.copy2(mp4, os.path.join(video_dst, "final_video.mp4"))
+
     meta = {
         "version":    v,
         "label":      label or f"Auto-save v{v}",
         "saved_at":   datetime.now(timezone.utc).isoformat(),
-        "video_path": _find_mp4(run_dir) or "",
+        "video_path": mp4 or "",   # kept for backward compatibility
     }
     with open(os.path.join(dest, "version.json"), "w") as f:
         json.dump(meta, f, indent=2)
@@ -131,12 +144,42 @@ def get_version_meta(run_dir: str, version: int) -> Optional[Dict[str, Any]]:
 
 
 def restore_version(run_dir: str, version: int):
-    """Copy files from versions/vN/ back into run_dir (overwriting current)."""
+    """
+    Restore a complete version snapshot back into run_dir:
+    JSON configs, images, audio, and the video file.
+    """
+    import glob as _glob
+
     src_dir = os.path.join(_versions_dir(run_dir), f"v{version}")
     if not os.path.isdir(src_dir):
         raise FileNotFoundError(f"Version v{version} not found in {run_dir}")
 
+    # 1. JSON config files
     for fname in _VERSIONED_FILES:
         src = os.path.join(src_dir, fname)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(run_dir, fname))
+
+    # 2. Images
+    img_src = os.path.join(src_dir, "images")
+    if os.path.isdir(img_src):
+        img_dst = os.path.join(run_dir, "images")
+        os.makedirs(img_dst, exist_ok=True)
+        for img in _glob.glob(os.path.join(img_src, "*.png")) + \
+                   _glob.glob(os.path.join(img_src, "*.jpg")):
+            shutil.copy2(img, os.path.join(img_dst, os.path.basename(img)))
+
+    # 3. Audio
+    audio_src = os.path.join(src_dir, "audio")
+    if os.path.isdir(audio_src):
+        audio_dst = os.path.join(run_dir, "audio")
+        if os.path.isdir(audio_dst):
+            shutil.rmtree(audio_dst)
+        shutil.copytree(audio_src, audio_dst)
+
+    # 4. Video
+    video_src = os.path.join(src_dir, "video", "final_video.mp4")
+    if os.path.exists(video_src):
+        video_dst_dir = os.path.join(run_dir, "video")
+        os.makedirs(video_dst_dir, exist_ok=True)
+        shutil.copy2(video_src, os.path.join(video_dst_dir, "final_video.mp4"))
