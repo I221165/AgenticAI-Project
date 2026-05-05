@@ -661,9 +661,12 @@ async def _execute_edit_bg(run_id: str, intent: dict, instruction: str, version_
     await _emit(run_id, 5, "running", 0, f"Processing edit: {instruction}")
     try:
         from agents.edit_agent.agent import run_edit
-        result = await loop.run_in_executor(
-            _executor, lambda: run_edit(run_id, intent, _run_dir(run_id), instruction)
+        # Wire progress callback so sub-phase (Phase 2/3) events reach the WebSocket
+        wrapped = _make_phase_runner(
+            lambda: run_edit(run_id, intent, _run_dir(run_id), instruction),
+            run_id, loop,
         )
+        result = await loop.run_in_executor(_executor, wrapped)
         if result.get("new_video"):
             RUNS.setdefault(run_id, {})["final_video_path"] = result["new_video"]
         ai_text = (

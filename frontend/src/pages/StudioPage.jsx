@@ -128,6 +128,12 @@ export default function StudioPage() {
   const [lightboxImg, setLightboxImg]     = useState(null)
   const [comparison, setComparison]       = useState(null)
 
+  // Edit-time progress received over WebSocket
+  const [editActive, setEditActive]   = useState(false)
+  const [editPhaseNum, setEditPhaseNum] = useState(5)
+  const [editPct, setEditPct]         = useState(0)
+  const [editMsg, setEditMsg]         = useState('')
+
   // Version browsing: null = viewing current live state, number = viewing a snapshot
   const [viewingVersion, setViewingVersion]   = useState(null)
   const [versionAssets, setVersionAssets]     = useState(null)   // fetched snapshot data
@@ -168,6 +174,41 @@ export default function StudioPage() {
   const displayCharacters = viewingVersion ? (versionAssets?.characters?.characters || [])          : characters
   const displayScenes     = viewingVersion ? (versionAssets?.script?.scenes || [])                  : scenes
   const displayVideoUrl   = viewingVersion ? (versionAssets?.video_url || null)                     : videoUrl
+
+  // WebSocket — listen for Phase 5 (and sub-phase) progress during edits
+  useEffect(() => {
+    if (!runId) return
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const url   = `${proto}://${window.location.host}/ws/${runId}`
+    let ws
+    try { ws = new WebSocket(url) } catch { return }
+
+    ws.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data)
+        if (!d.phase) return
+        const phase = d.phase
+        const pct   = d.progress ?? 0
+        const msg   = d.message  ?? ''
+        const done  = d.status === 'done' || d.status === 'error'
+
+        if (phase === 5) {
+          if (d.status === 'running') { setEditActive(true); setEditPhaseNum(5); setEditPct(0); setEditMsg(msg) }
+          if (done) {
+            setEditPct(100); setEditMsg(done && d.status === 'error' ? '✗ ' + msg : '✓ Done')
+            setTimeout(() => { setEditActive(false); setRefreshKey(k => k + 1) }, 1200)
+          }
+        } else if (editActive || phase >= 2) {
+          // Sub-phase progress (Phase 2 audio, Phase 3 video) streaming inside an edit
+          setEditPhaseNum(phase)
+          setEditPct(pct)
+          setEditMsg(msg)
+        }
+      } catch { /* ignore malformed */ }
+    }
+    ws.onerror = () => {}
+    return () => { try { ws.close() } catch { /* ignore */ } }
+  }, [runId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!playing || videoUrl) return
@@ -963,6 +1004,37 @@ export default function StudioPage() {
               </AnimatePresence>
               <div ref={chatEndRef} />
             </div>
+
+            {/* Phase 5 edit progress bar */}
+            <AnimatePresence>
+              {editActive && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="px-4 pt-3 pb-1"
+                >
+                  <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 px-3 py-2">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] font-display font-bold text-violet-400 uppercase tracking-widest">
+                        Phase {editPhaseNum} — Applying edit
+                      </span>
+                      <span className="text-[10px] font-mono text-violet-300">{editPct}%</span>
+                    </div>
+                    <div className="w-full h-1 bg-slate-700 rounded-full overflow-hidden">
+                      <motion.div
+                        className="h-full bg-gradient-to-r from-violet-500 to-blue-500 rounded-full"
+                        animate={{ width: `${editPct}%` }}
+                        transition={{ duration: 0.3 }}
+                      />
+                    </div>
+                    {editMsg && (
+                      <p className="mt-1 text-[10px] text-slate-400 truncate font-body">{editMsg}</p>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* Input */}
             <div className="px-4 py-3 flex gap-3 items-center border-t border-border">

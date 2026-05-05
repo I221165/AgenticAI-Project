@@ -82,10 +82,16 @@ def classify_intent(instruction: str, run_dir: str) -> dict:
     falls back to a rule-based classifier if the LLM call fails.
     """
     try:
-        return _llm_classify(instruction)
+        result = _llm_classify(instruction)
+        # LLM may return "all" even when a character name is in the instruction — fix it up
+        if result.get("target") == "all":
+            char = _extract_character_target(instruction.lower(), run_dir)
+            if char != "all":
+                result["target"] = char
+        return result
     except Exception as e:
         print(f"[IntentClassifier] LLM failed ({e}), using rule-based fallback")
-        return _rule_classify(instruction)
+        return _rule_classify(instruction, run_dir)
 
 
 def _llm_classify(instruction: str) -> dict:
@@ -110,7 +116,7 @@ def _llm_classify(instruction: str) -> dict:
     return parsed
 
 
-def _rule_classify(instruction: str) -> dict:
+def _rule_classify(instruction: str, run_dir: str = "") -> dict:
     """Keyword-based fallback classifier covering all 12 intent types."""
     low = instruction.lower()
 
@@ -144,8 +150,13 @@ def _rule_classify(instruction: str) -> dict:
     else:
         intent_type = "scene_regen"
 
+    # 1. Try explicit scene number
     scene_match = re.search(r"scene[_\s]?(\d+)", low)
-    target = f"scene_{scene_match.group(1)}" if scene_match else "all"
+    if scene_match:
+        target = f"scene_{scene_match.group(1)}"
+    else:
+        # 2. Try character name match from characters.json
+        target = _extract_character_target(low, run_dir)
 
     return {
         "type": intent_type,
@@ -153,3 +164,24 @@ def _rule_classify(instruction: str) -> dict:
         "value": instruction,
         "raw": instruction,
     }
+
+
+def _extract_character_target(low: str, run_dir: str) -> str:
+    """Return a matched character name from characters.json, or 'all'."""
+    if not run_dir:
+        return "all"
+    chars_path = os.path.join(run_dir, "characters.json")
+    if not os.path.exists(chars_path):
+        return "all"
+    try:
+        with open(chars_path) as f:
+            data = json.load(f)
+        for char in data.get("characters", []):
+            name = char.get("name", "")
+            # Match full name or any single word from the name (e.g. "conductor" matches "The Conductor")
+            parts = [p.lower() for p in name.split() if len(p) > 2]
+            if name.lower() in low or any(p in low for p in parts):
+                return name
+    except Exception:
+        pass
+    return "all"
