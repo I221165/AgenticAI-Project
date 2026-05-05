@@ -1,4 +1,5 @@
 import os
+import random
 import time
 import urllib.parse
 from typing import Optional
@@ -16,6 +17,7 @@ class ImageGenArgs(BaseModel):
     width: int = Field(1280, description="Output image width in pixels.")
     height: int = Field(720, description="Output image height in pixels.")
     seed: Optional[int] = Field(None, description="Seed for reproducibility. Auto-derived from scene_id if None.")
+    force_regen: bool = Field(False, description="Skip file cache and use a fresh random seed. Use for edit-time regeneration.")
 
 
 class ImageGenTool(BaseAgenticTool):
@@ -44,12 +46,18 @@ class ImageGenTool(BaseAgenticTool):
         width: int = 1280,
         height: int = 720,
         seed: Optional[int] = None,
+        force_regen: bool = False,
     ) -> str:
         os.makedirs(output_dir, exist_ok=True)
 
-        # Derive a consistent seed from scene_id so all 3 frames share the same style
-        if seed is None:
-            seed = abs(hash(scene_id)) % 9999
+        # force_regen: use a fresh random seed so Pollinations generates a new image.
+        # Normal generation: derive seed from scene_id so all 3 frames share the same style.
+        if force_regen:
+            if seed is None:
+                seed = random.randint(1, 99999)
+        else:
+            if seed is None:
+                seed = abs(hash(scene_id)) % 9999
 
         modifier = self.FRAME_MODIFIERS.get(frame_type, "")
         full_prompt = f"{modifier}, {prompt}" if modifier else prompt
@@ -62,7 +70,7 @@ class ImageGenTool(BaseAgenticTool):
 
         output_path = os.path.join(output_dir, f"{scene_id}_{frame_type}.png")
 
-        if os.path.exists(output_path):
+        if os.path.exists(output_path) and not force_regen:
             print(f"[ImageGen] Cached: {output_path}")
             return output_path
 

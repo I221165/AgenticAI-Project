@@ -191,6 +191,87 @@ def _recompose_video(run_dir: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Targeted audio helpers (avoid re-running TTS for unchanged lines)
+# ---------------------------------------------------------------------------
+
+def _reregen_tts_for_entries(run_dir: str, handoff: dict, entries: list, filter_fn) -> None:
+    """Re-run TTS only for entries where filter_fn(entry) is True. Updates entries in-place."""
+    from mcp.registry import ToolRegistry
+    from agents.audio_agent.agent import _EMOTION_GAP_MS, _DEFAULT_GAP_MS
+    tts_tool = ToolRegistry.get_tool("tts_generator")
+    language = handoff.get("language", "English")
+
+    def _get_voice(char_name: str) -> str:
+        for c in handoff.get("voice_configs", []):
+            if c.get("name", "").lower() == char_name.lower():
+                return c.get("voice_personality", "Neutral")
+        return "Neutral"
+
+    for entry in entries:
+        if not filter_fn(entry):
+            continue
+        char_name = entry["character_name"]
+        scene_id = entry["scene_id"]
+        audio_dir = os.path.join(run_dir, "audio", scene_id)
+        os.makedirs(audio_dir, exist_ok=True)
+        try:
+            new_path = tts_tool.execute(
+                text=entry["text"],
+                character_name=char_name,
+                voice_personality=_get_voice(char_name),
+                emotion=entry.get("emotion", "neutral"),
+                output_dir=audio_dir,
+                provider=4,
+                language=language,
+            )
+            entry["audio_file"] = new_path
+            print(f"[EditAgent] Re-TTS {char_name} ({scene_id}) → {new_path}")
+        except Exception as e:
+            print(f"[EditAgent] TTS failed for {char_name} in {scene_id}: {e}")
+
+    # Recalculate cumulative timings — audio lengths may have changed
+    try:
+        from agents.audio_agent.agent import _load_audio, _EMOTION_GAP_MS, _DEFAULT_GAP_MS
+        cumulative_ms = 0
+        for entry in entries:
+            audio_path = entry.get("audio_file", "")
+            if os.path.exists(audio_path):
+                duration_ms = len(_load_audio(audio_path))
+            else:
+                duration_ms = entry.get("end_ms", 2000) - entry.get("start_ms", 0) or 2000
+            entry["start_ms"] = cumulative_ms
+            entry["end_ms"] = cumulative_ms + duration_ms
+            gap_ms = _EMOTION_GAP_MS.get(entry.get("emotion", "neutral"), _DEFAULT_GAP_MS)
+            cumulative_ms = entry["end_ms"] + gap_ms
+    except Exception as e:
+        print(f"[EditAgent] Timing recalc skipped: {e}")
+
+
+def _remix_with_entries(run_dir: str, handoff: dict, entries: list, bgm_tracks: dict = None) -> str:
+    """Re-mix audio from existing entries (no TTS), recompose video. Returns video path."""
+    from agents.audio_agent.agent import (
+        AudioState, select_bgm, mix_scene_audio, assemble_full_audio, serialize_node,
+    )
+    state: AudioState = {
+        "handoff_json": handoff,
+        "provider": 4,
+        "run_dir": run_dir,
+        "language": handoff.get("language", "English"),
+        "voice_map": {},
+        "bgm_tracks": bgm_tracks or {},
+        "timing_manifest": entries,
+        "mixed_audio_files": [],
+        "full_audio_path": "",
+        "error": "",
+    }
+    state = {**state, **select_bgm(state)}
+    state = {**state, **mix_scene_audio(state)}
+    state = {**state, **assemble_full_audio(state)}
+    serialize_node(state)
+    return _recompose_video(run_dir)
+
+
+# ---------------------------------------------------------------------------
 # Edit handlers — original 5
 # ---------------------------------------------------------------------------
 
@@ -224,9 +305,23 @@ def _edit_voice(run_dir: str, target: str, value: str) -> dict:
                 char["voice_personality"] = value
         _save(chars_path, chars)
 
-    from agents.audio_agent.agent import run_phase2
-    result = run_phase2(handoff, provider=4, run_dir=run_dir)
-    return {"new_video": _recompose_video(run_dir)}
+    if target == "all":
+        # All characters changed — full Phase 2 re-run
+        from agents.audio_agent.agent import run_phase2
+        run_phase2(handoff, provider=4, run_dir=run_dir)
+        return {"new_video": _recompose_video(run_dir)}
+
+    # Specific character — re-run TTS only for their lines, keep everyone else's audio
+    tm_path = os.path.join(run_dir, "timing_manifest.json")
+    tm_data = _load(tm_path) if os.path.exists(tm_path) else {}
+    entries = tm_data.get("entries", [])
+    bgm_tracks = tm_data.get("bgm_tracks", {})
+
+    _reregen_tts_for_entries(
+        run_dir, handoff, entries,
+        filter_fn=lambda e: _name_matches(e.get("character_name", "")),
+    )
+    return {"new_video": _remix_with_entries(run_dir, handoff, entries, bgm_tracks)}
 
 
 def _edit_scene_regen(run_dir: str, target: str, value: str) -> dict:
@@ -277,7 +372,7 @@ def _edit_style(run_dir: str, target: str, value: str) -> dict:
 
 
 def _edit_bgm(run_dir: str, target: str, value: str) -> dict:
-    """Re-select BGM with new tone and remix audio."""
+    """Re-select BGM with new tone and remix — no TTS re-run, dialogue audio untouched."""
     handoff_path = os.path.join(run_dir, "phase2_audio_handoff.json")
     handoff = _load(handoff_path)
     for scene in handoff.get("segments", []):
@@ -286,27 +381,17 @@ def _edit_bgm(run_dir: str, target: str, value: str) -> dict:
             print(f"[EditAgent] BGM tone → {scene['scene_id']}: {value}")
     _save(handoff_path, handoff)
 
-    from agents.audio_agent.agent import (
-        AudioState, assign_voices, generate_dialogue_audio,
-        select_bgm, mix_scene_audio, assemble_full_audio, serialize_node,
-    )
-    state: AudioState = {
-        "handoff_json": handoff, "provider": 4, "run_dir": run_dir,
-        "language": handoff.get("language", "English"),
-        "voice_map": {}, "bgm_tracks": {}, "timing_manifest": [],
-        "mixed_audio_files": [], "full_audio_path": "", "error": "",
-    }
-    state = {**state, **assign_voices(state)}
-    state = {**state, **generate_dialogue_audio(state)}
-    state = {**state, **select_bgm(state)}
-    state = {**state, **mix_scene_audio(state)}
-    state = {**state, **assemble_full_audio(state)}
-    serialize_node(state)
-    return {"new_video": _recompose_video(run_dir)}
+    # Load existing dialogue timing — no need to regenerate any speech
+    tm_path = os.path.join(run_dir, "timing_manifest.json")
+    tm_data = _load(tm_path) if os.path.exists(tm_path) else {}
+    entries = tm_data.get("entries", [])
+
+    # select_bgm runs inside _remix_with_entries, picking up the updated tone
+    return {"new_video": _remix_with_entries(run_dir, handoff, entries)}
 
 
 def _edit_script(run_dir: str, target: str, value: str) -> dict:
-    """Patch script with edit instruction then re-run audio."""
+    """Rewrite dialogue lines via LLM then regenerate audio for changed scenes."""
     script_path = os.path.join(run_dir, "script.json")
     story_path  = os.path.join(run_dir, "story.json")
     chars_path  = os.path.join(run_dir, "characters.json")
@@ -315,19 +400,111 @@ def _edit_script(run_dir: str, target: str, value: str) -> dict:
     story      = _load(story_path)
     characters = _load(chars_path)
 
-    for scene in script.get("scenes", []):
-        if scene.get("scene_id") == target or target == "all":
-            scene["_edit_instruction"] = value
+    # Identify scenes to rewrite
+    target_scenes = [
+        s for s in script.get("scenes", [])
+        if s.get("scene_id") == target or target == "all"
+    ]
+
+    # Call LLM to rewrite dialogue for each target scene
+    try:
+        from mcp.tools.llm_tools.text_generator import TextGeneratorTool
+        from mcp.tools.llm_tools.json_structurer import JsonStructurerTool
+        llm = TextGeneratorTool()
+        structurer = JsonStructurerTool()
+
+        char_names = [c.get("name", "") for c in (
+            characters.get("characters", characters) if isinstance(characters, dict) else characters
+        )]
+
+        for scene in target_scenes:
+            existing_lines = scene.get("dialogue_lines", [])
+            existing_text = "\n".join(
+                f'{l["character_name"]}: {l["text"]}' for l in existing_lines
+            )
+            prompt = (
+                f"You are rewriting dialogue for an animated short film.\n\n"
+                f"Story context: {json.dumps(story.get('story_arc', story), ensure_ascii=False)[:600]}\n"
+                f"Scene setting: {scene.get('setting', '')}\n"
+                f"Characters available: {', '.join(char_names)}\n"
+                f"Current dialogue:\n{existing_text}\n\n"
+                f"Edit instruction: {value}\n\n"
+                f"Rewrite the dialogue following the instruction. Keep the same characters. "
+                f"Return ONLY a JSON array of objects with keys: character_name, text, emotion.\n"
+                f'Example: [{{"character_name": "Alex", "text": "Hello.", "emotion": "happy"}}]'
+            )
+            raw = llm.execute(prompt=prompt)
+            new_lines = structurer.execute(
+                raw_text=raw,
+                schema={
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "character_name": {"type": "string"},
+                            "text": {"type": "string"},
+                            "emotion": {"type": "string"},
+                        },
+                        "required": ["character_name", "text", "emotion"],
+                    },
+                },
+            )
+            if new_lines and isinstance(new_lines, list):
+                scene["dialogue_lines"] = new_lines
+                print(f"[EditAgent] script_edit rewrote {len(new_lines)} lines for {scene['scene_id']}")
+
+    except Exception as e:
+        print(f"[EditAgent] LLM rewrite failed ({e}), keeping original dialogue")
 
     _save(script_path, script)
 
-    from shared.utils.serializer import serialize_phase1_outputs
-    serialize_phase1_outputs(
-        {"story_output": story, "character_roster": characters,
-         "script_output": script, "style": _get_style(run_dir), "duration": "medium"},
-        output_dir=run_dir,
+    # Propagate updated dialogue into the audio handoff so TTS picks it up
+    handoff_path = os.path.join(run_dir, "phase2_audio_handoff.json")
+    handoff = _load(handoff_path) if os.path.exists(handoff_path) else {}
+    if handoff:
+        scene_map = {s["scene_id"]: s for s in script.get("scenes", [])}
+        for seg in handoff.get("segments", []):
+            sid = seg.get("scene_id")
+            if sid in scene_map:
+                seg["dialogue_lines"] = scene_map[sid].get("dialogue_lines", seg.get("dialogue_lines", []))
+        _save(handoff_path, handoff)
+
+    # Load existing timing manifest and rebuild entries for changed scenes only.
+    # Lines may have been added/removed by the LLM so we replace whole-scene entries.
+    tm_path = os.path.join(run_dir, "timing_manifest.json")
+    tm_data = _load(tm_path) if os.path.exists(tm_path) else {}
+    entries = tm_data.get("entries", [])
+    bgm_tracks = tm_data.get("bgm_tracks", {})
+
+    changed_sids = {s["scene_id"] for s in target_scenes}
+
+    # Remove stale entries for changed scenes, keep untouched scenes
+    entries = [e for e in entries if e.get("scene_id") not in changed_sids]
+
+    # Add skeleton entries for the new dialogue lines (audio_file filled by TTS below)
+    for scene in target_scenes:
+        for idx, line in enumerate(scene.get("dialogue_lines", [])):
+            entries.append({
+                "scene_id":       scene["scene_id"],
+                "line_index":     idx,
+                "character_name": line["character_name"],
+                "text":           line["text"],
+                "emotion":        line.get("emotion", "neutral"),
+                "audio_file":     "",
+                "start_ms":       0,
+                "end_ms":         0,
+            })
+
+    # Sort entries so scenes stay in script order
+    scene_order = {s["scene_id"]: i for i, s in enumerate(script.get("scenes", []))}
+    entries.sort(key=lambda e: (scene_order.get(e["scene_id"], 999), e.get("line_index", 0)))
+
+    # Re-run TTS only for the new/changed entries, leave existing audio untouched
+    _reregen_tts_for_entries(
+        run_dir, handoff, entries,
+        filter_fn=lambda e: e.get("scene_id") in changed_sids,
     )
-    return _edit_voice(run_dir, "all", "")
+    return {"new_video": _remix_with_entries(run_dir, handoff, entries, bgm_tracks)}
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@
 12. [Sample Output](#12-sample-output)
 13. [Setup and Execution](#13-setup-and-execution)
 14. [Conclusion](#14-conclusion)
+15. [Individual Contributions](#15-individual-contributions)
 
 ---
 
@@ -379,7 +380,7 @@ Each pipeline run has a dedicated directory `run_outputs/{run_id}/` containing:
 
 ### Version Snapshots (`history.py`)
 
-Before every edit, `save_version()` creates a full point-in-time snapshot:
+Before every edit, `save_version()` creates a **fully self-contained** point-in-time snapshot — every asset needed to reproduce that exact state is stored inside the version folder:
 
 ```
 run_outputs/{run_id}/
@@ -389,19 +390,29 @@ run_outputs/{run_id}/
             characters.json
             script.json
             timing_manifest.json
-            images/              ← full image snapshot
+            images/                    ← all scene keyframes
                 scene_1_wide.png
                 scene_2_mid.png
                 ...
-            version.json         ← {version, label, saved_at, video_path}
+            audio/                     ← complete audio snapshot
+                full_audio.mp3
+                mixed/
+                    scene_1_mixed.mp3
+                    scene_2_mixed.mp3
+                    ...
+            video/
+                final_video.mp4        ← actual video file copy
+            version.json               ← {version, label, saved_at}
         v2/
             ...
 ```
 
 This enables:
-- **Before/after video comparison** — each snapshot records which MP4 existed at save time
-- **Per-version asset browsing** — Studio UI fetches `/versions/{v}/assets` to show historical images
-- **Full revert** — `restore_version()` copies all JSON + images back to run root
+- **Complete version isolation** — each version folder is fully independent; browsing v2 loads its own images, audio, and video without touching the live state
+- **Before/after video comparison** — the video player switches between the snapshot's `video/final_video.mp4` and the current live video
+- **Per-version asset browsing** — Studio UI fetches `/versions/{v}/assets` which returns images, audio file list, characters, script, and video URL all from the snapshot
+- **Full revert** — `restore_version()` copies JSON, images, audio, and video back to run root, fully restoring that state
+- **Branch edits** — editing while browsing a snapshot sends `base_version` to the backend, which restores that version first so the edit branches from that historical state rather than the latest
 
 ### MongoDB Storage (`storage.py`)
 - `StateManager.create_run()` creates a run document
@@ -497,3 +508,24 @@ StoryForge AI demonstrates a complete agentic AI system built on modern LLM orch
 - **Graceful degradation** — MongoDB unavailable? Falls back to JSON files. LLM classifier fails? Rule-based fallback activates.
 
 The system successfully generates animated short films from a single prompt and supports iterative AI-powered editing through a natural language chat interface.
+
+---
+
+## 15. Individual Contributions
+
+| Phase | Component | Contributor |
+|---|---|---|
+| **Phase 1** | Story Generation Agent — `story_node`, `character_node`, `script_node`, LLM prompting, Pydantic schema design | Farhan Ahmed |
+| **Phase 2** | Audio Generation Agent — voice assignment, TTS integration (Edge-TTS / ElevenLabs / gTTS / Coqui), BGM selection, timing manifest | Farhan Ahmed |
+| **Phase 3** | Video Composition Agent — image generation (Pollinations.ai), Ken Burns animation (FFmpeg), scene composition, audio sync, subtitle burn | Hamza |
+| **Phase 4** | FastAPI backend, REST + WebSocket API, MongoDB integration, React Studio UI, asset browser, video player, real-time progress | Hamza |
+| **Phase 5** | Edit Agent — LangGraph MemorySaver, IntentClassifier (LLM + rule fallback), 12 edit handlers, version history, branch edits | Hamza |
+
+### Farhan Ahmed
+- Designed and implemented the **Story Generation pipeline** (Phase 1), including the 3-node LangGraph graph, JSON schema for `story.json` / `characters.json` / `script.json`, and all LLM prompt engineering for narrative structure, character creation, and scene scripting.
+- Designed and implemented the **Audio Generation pipeline** (Phase 2), including the multi-provider TTS tool (Edge-TTS as primary with ElevenLabs / gTTS / Coqui fallbacks), emotion-to-prosody mapping, voice personality keyword matching, BGM tone selection, pydub-based audio mixing, and the `timing_manifest.json` schema consumed by Phase 3.
+
+### Hamza
+- Designed and implemented the **Video Composition pipeline** (Phase 3), including AI image generation via Pollinations.ai (3 keyframes per scene), Ken Burns motion effects via FFmpeg `zoompan`, scene transitions, dialogue + BGM audio sync, and SRT subtitle burn.
+- Designed and implemented the **FastAPI backend and React Studio UI** (Phase 4), including all REST endpoints, WebSocket real-time progress streaming, MongoDB persistence with JSON fallback, the full Studio dashboard (asset browser, chat panel, video player, before/after comparison), and version history browser.
+- Designed and implemented the **AI Edit Agent** (Phase 5), including the LangGraph StateGraph with MemorySaver checkpointer, LLM-first intent classifier with 12 intent types and rule-based fallback, planner/executor architecture, all 12 edit handler functions, complete version snapshot system (JSON + images + audio + video per version), and branch-edit support for editing from historical snapshots.

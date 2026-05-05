@@ -1,0 +1,216 @@
+@startuml StoryForge_AI_Architecture
+!pragma layout smetana
+!theme plain
+skinparam backgroundColor #0D1117
+skinparam defaultFontName "Segoe UI"
+skinparam defaultFontSize 11
+skinparam defaultFontColor #E6EDF3
+skinparam ArrowColor #58A6FF
+skinparam ArrowThickness 1.5
+skinparam roundcorner 8
+
+skinparam actor {
+  BackgroundColor #21262D
+  BorderColor #30363D
+  FontColor #E6EDF3
+}
+
+skinparam package {
+  BackgroundColor #161B22
+  BorderColor #30363D
+  FontColor #58A6FF
+  FontStyle bold
+}
+
+skinparam component {
+  BackgroundColor #21262D
+  BorderColor #30363D
+  FontColor #E6EDF3
+}
+
+skinparam database {
+  BackgroundColor #21262D
+  BorderColor #F0883E
+  FontColor #E6EDF3
+}
+
+skinparam node {
+  BackgroundColor #21262D
+  BorderColor #30363D
+  FontColor #E6EDF3
+}
+
+skinparam cloud {
+  BackgroundColor #21262D
+  BorderColor #3FB950
+  FontColor #E6EDF3
+}
+
+skinparam rectangle {
+  BackgroundColor #21262D
+  BorderColor #30363D
+  FontColor #E6EDF3
+}
+
+' ─── TITLE ────────────────────────────────────────────────
+title <size:18><b>StoryForge AI — System Architecture</b></size>\n<size:12>Multi-Agent Animated Video Generation Pipeline</size>
+
+' ─── ACTORS ───────────────────────────────────────────────
+actor "User" as USER #21262D
+
+' ─── EXTERNAL SERVICES ────────────────────────────────────
+cloud "Groq Cloud\n(Llama 3.1 8B/70B)" as GROQ #1C2128
+cloud "Pollinations.ai\n(Image Gen)" as POLLINATIONS #1C2128
+cloud "Microsoft Edge-TTS\n(Neural Voices)" as EDGETSS #1C2128
+cloud "ElevenLabs\n(Premium TTS)" as ELEVENLABS #1C2128
+
+' ─── DATABASE ─────────────────────────────────────────────
+database "MongoDB\n(run state + chat)" as MONGO #1C2128
+database "Local Filesystem\nrun_outputs/{run_id}/" as FS #1C2128
+
+' ─── FRONTEND ─────────────────────────────────────────────
+package "Frontend — React 18 + Vite + Tailwind" <<Frontend>> {
+  component "[Studio Page]" as STUDIO
+  component "[Progress Bar\n(WebSocket)]" as PROGRESSBAR
+  component "[Asset Browser\n(Images/Scenes)]" as ASSETBROWSER
+  component "[Video Player\n(Before/After)]" as VIDEOPLAYER
+  component "[Chat Panel\n(Edit History)]" as CHATPANEL
+  component "[Version Browser\n(Snapshot Preview)]" as VERSIONBROWSER
+}
+
+' ─── BACKEND ──────────────────────────────────────────────
+package "Backend — FastAPI + Uvicorn" <<Backend>> {
+  component "[REST API\n/api/runs/**]" as RESTAPI
+  component "[WebSocket\n/ws/{run_id}]" as WEBSOCKET
+  component "[Background Task\nRunner]" as TASKRUNNER
+}
+
+' ─── MCP TOOL LAYER ───────────────────────────────────────
+package "MCP Tool Layer — BaseAgenticTool + ToolRegistry" <<MCP>> {
+  component "[text_generator\n(Groq/Ollama)]" as TEXTGEN
+  component "[json_structurer\n(Schema Extraction)]" as JSONSTR
+  component "[tts_tool\n(Multi-Provider)]" as TTSTOOL
+  component "[bgm_tool\n(Tone Matching)]" as BGMTOOL
+  component "[audio_merger\n(pydub mix)]" as AUDIOMERGE
+  component "[image_gen_tool\n(Pollinations.ai)]" as IMAGETOOL
+  component "[video_tool\n(FFmpeg)]" as VIDEOTOOL
+  component "[filter_tool\n(Pillow+NumPy)]" as FILTERTOOL
+}
+
+' ─── PHASE 1 ──────────────────────────────────────────────
+package "Phase 1 — Story Agent  (LangGraph StateGraph)" <<Phase1>> {
+  component "[story_node\n→ StoryOutput]" as P1S
+  component "[character_node\n→ CharacterRoster]" as P1C
+  component "[script_node\n→ SceneScript]" as P1SC
+  component "[serialize_node\n→ story.json\n   characters.json\n   script.json]" as P1SER
+  P1S --> P1C
+  P1C --> P1SC
+  P1SC --> P1SER
+}
+
+' ─── PHASE 2 ──────────────────────────────────────────────
+package "Phase 2 — Audio Agent  (LangGraph StateGraph)" <<Phase2>> {
+  component "[assign_voices\n→ voice map]" as P2V
+  component "[generate_audio\n→ WAV clips]" as P2A
+  component "[select_bgm\n→ MP3 tracks]" as P2B
+  component "[serialize_node\n→ timing_manifest.json\n   phase2_audio_handoff.json]" as P2SER
+  P2V --> P2A
+  P2A --> P2B
+  P2B --> P2SER
+}
+
+' ─── PHASE 3 ──────────────────────────────────────────────
+package "Phase 3 — Video Agent  (LangGraph StateGraph)" <<Phase3>> {
+  component "[generate_images\n→ 3 keyframes/scene]" as P3I
+  component "[animate_frames\n→ Ken Burns FFmpeg]" as P3A
+  component "[compose_scenes\n→ transitions]" as P3C
+  component "[sync_audio\n→ dialogue+BGM]" as P3S
+  component "[add_subtitles\n→ SRT burn]" as P3SUB
+  component "[serialize_node\n→ final_video.mp4\n   phase3_video_handoff.json]" as P3SER
+  P3I --> P3A
+  P3A --> P3C
+  P3C --> P3S
+  P3S --> P3SUB
+  P3SUB --> P3SER
+}
+
+' ─── PHASE 5 ──────────────────────────────────────────────
+package "Phase 5 — Edit Agent  (LangGraph + MemorySaver)" <<Phase5>> {
+  component "[IntentClassifier\nLLM → rule fallback\n12 intent types]" as P5I
+  component "[EditGraph\nclassify→execute\n→finalize]" as P5G
+  component "[Planner\naction steps]" as P5P
+  component "[Executor\nhandler dispatch]" as P5E
+  component "[save_version()\nJSON+images+audio\n+video snapshot]" as P5V
+  P5I --> P5G
+  P5G --> P5P
+  P5P --> P5E
+  P5E --> P5V
+}
+
+' ─── STATE MANAGER ────────────────────────────────────────
+package "State Manager" <<StateManager>> {
+  component "[history.py\nversion snapshots\nversions/vN/]" as HISTORY
+  component "[run_state.py\nrun metadata\npersistence]" as RUNSTATE
+}
+
+' ═══════════════════════════════════════════════════════════
+' CONNECTIONS
+' ═══════════════════════════════════════════════════════════
+
+' User ↔ Frontend
+USER --> STUDIO : "1. Enter prompt\nor edit instruction"
+STUDIO -[#58A6FF]-> PROGRESSBAR
+STUDIO -[#58A6FF]-> ASSETBROWSER
+STUDIO -[#58A6FF]-> VIDEOPLAYER
+STUDIO -[#58A6FF]-> CHATPANEL
+STUDIO -[#58A6FF]-> VERSIONBROWSER
+
+' Frontend ↔ Backend
+STUDIO --> RESTAPI : "HTTP REST\nPOST /api/runs\nPOST .../edit"
+PROGRESSBAR <-- WEBSOCKET : "WS events\n{phase, pct, msg}"
+RESTAPI --> TASKRUNNER : "background\nasync task"
+
+' Backend ↔ DB
+RESTAPI <--> MONGO : "upsert run state\nchat history"
+TASKRUNNER --> FS : "read/write\nrun artifacts"
+
+' Pipeline flow (Phase 1 → 2 → 3)
+TASKRUNNER --> P1S : "start pipeline"
+P1SER --> P2V : "handoff\n(story+script JSON)"
+P2SER --> P3I : "handoff\n(timing manifest)"
+P3SER --> RESTAPI : "pipeline complete\n→ notify WS"
+
+' Phase 5 triggered by edit
+RESTAPI --> P5I : "edit instruction\n+ run_dir"
+P5V --> HISTORY : "create versions/vN/"
+P5V --> RESTAPI : "done → WS event"
+
+' MCP tools used by phases
+P1S --> TEXTGEN
+P1C --> JSONSTR
+P1SC --> TEXTGEN
+P2A --> TTSTOOL
+P2B --> BGMTOOL
+P2A --> AUDIOMERGE
+P3I --> IMAGETOOL
+P3A --> VIDEOTOOL
+P3C --> VIDEOTOOL
+P3S --> VIDEOTOOL
+P5E --> TTSTOOL
+P5E --> IMAGETOOL
+P5E --> FILTERTOOL
+P5E --> VIDEOTOOL
+
+' MCP tools → external
+TEXTGEN --> GROQ
+JSONSTR --> GROQ
+P5I --> GROQ
+TTSTOOL --> EDGETSS
+TTSTOOL --> ELEVENLABS
+IMAGETOOL --> POLLINATIONS
+
+' Version browser
+VERSIONBROWSER --> RESTAPI : "GET .../versions\nGET .../versions/{v}/assets"
+HISTORY --> FS
+
+@enduml
