@@ -200,13 +200,29 @@ def _edit_voice(run_dir: str, target: str, value: str) -> dict:
     if not os.path.exists(handoff_path):
         raise FileNotFoundError("phase2_audio_handoff.json not found")
 
+    t_low = target.lower()
+
+    def _name_matches(char_name: str) -> bool:
+        n = char_name.lower()
+        # exact substring match OR any individual word in target matches any word in name
+        return t_low in n or n in t_low or any(w in n for w in t_low.split() if len(w) > 2)
+
     handoff = _load(handoff_path)
     for char in handoff.get("voice_configs", []):
-        if target.lower() in char.get("name", "").lower() or target == "all":
+        if target == "all" or _name_matches(char.get("name", "")):
             char["voice_personality"] = value
             print(f"[EditAgent] Patched {char['name']} voice → {value}")
 
     _save(handoff_path, handoff)
+
+    # Also persist to characters.json so the change survives future reruns
+    chars_path = os.path.join(run_dir, "characters.json")
+    if os.path.exists(chars_path):
+        chars = _load(chars_path)
+        for char in chars.get("characters", []):
+            if target == "all" or _name_matches(char.get("name", "")):
+                char["voice_personality"] = value
+        _save(chars_path, chars)
 
     from agents.audio_agent.agent import run_phase2
     result = run_phase2(handoff, provider=4, run_dir=run_dir)

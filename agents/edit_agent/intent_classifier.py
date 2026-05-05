@@ -167,7 +167,11 @@ def _rule_classify(instruction: str, run_dir: str = "") -> dict:
 
 
 def _extract_character_target(low: str, run_dir: str) -> str:
-    """Return a matched character name from characters.json, or 'all'."""
+    """Return a matched character name from characters.json, or 'all'.
+    Matches against: full name, any word in the name, and the character's role.
+    e.g. 'narrator' matches a character with role='Narrator' even if their
+    name is 'Naomi Nakahara'.
+    """
     if not run_dir:
         return "all"
     chars_path = os.path.join(run_dir, "characters.json")
@@ -176,12 +180,17 @@ def _extract_character_target(low: str, run_dir: str) -> str:
     try:
         with open(chars_path) as f:
             data = json.load(f)
-        for char in data.get("characters", []):
+        # Two passes: name-match first (more specific), role-match second
+        characters = data.get("characters", [])
+        for char in characters:
             name = char.get("name", "")
-            # Match full name or any single word from the name (e.g. "conductor" matches "The Conductor")
             parts = [p.lower() for p in name.split() if len(p) > 2]
             if name.lower() in low or any(p in low for p in parts):
                 return name
+        for char in characters:
+            role = char.get("role", "").lower()
+            if role and role in low:
+                return char.get("name", "all")
     except Exception:
         pass
     return "all"
