@@ -83,8 +83,11 @@ def classify_intent(instruction: str, run_dir: str) -> dict:
     """
     try:
         result = _llm_classify(instruction)
-        # LLM may return "all" even when a character name is in the instruction — fix it up
-        if result.get("target") == "all":
+        # If the LLM didn't return a scene_id ("scene_N"), always try to resolve
+        # to a real character name (LLM often returns a role like "narrator"
+        # instead of the actual name "Naomi Nakahara")
+        current = result.get("target", "all")
+        if not re.match(r"^scene_\d+$", current):
             char = _extract_character_target(instruction.lower(), run_dir)
             if char != "all":
                 result["target"] = char

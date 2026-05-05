@@ -222,7 +222,7 @@ class TTSTool(BaseAgenticTool):
         if "smooth" in p or "confident" in p or "arrogant" in p:
             return self.EDGE_VOICES["male_confident"]
         if "old" in p or "elderly" in p or "wise" in p or "aged" in p:
-            return self.EDGE_VOICES["male_old"]
+            return self.EDGE_VOICES["female_mature"] if is_female else self.EDGE_VOICES["male_old"]
         if "young" in p or "teen" in p or "child" in p or "innocent" in p:
             return self.EDGE_VOICES["female_young"] if is_female else self.EDGE_VOICES["male_young"]
         if "energetic" in p or "fierce" in p or "strong" in p or "bold" in p:
