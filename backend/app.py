@@ -59,6 +59,8 @@ _executor = ThreadPoolExecutor(max_workers=4)
 # ── In-memory state ───────────────────────────────────────────────────────────
 RUNS: Dict[str, Dict[str, Any]] = {}
 WS_CLIENTS: Dict[str, List[WebSocket]] = {}
+HITL_EVENTS: Dict[str, asyncio.Event] = {}
+HITL_CANCELLED: set = set()
 
 # ── MongoDB (optional) ────────────────────────────────────────────────────────
 _mongo_col = None
@@ -204,6 +206,35 @@ async def _emit(run_id: str, phase: int, status: str, progress: int, message: st
     })
 
 
+def _hitl_key(run_id: str, phase: int) -> str:
+    return f"{run_id}_{phase}"
+
+
+def _cancel_hitl_for_run(run_id: str):
+    """Unblock all HITL waits for a run and mark them as cancelled."""
+    for key in list(HITL_EVENTS.keys()):
+        if key.startswith(f"{run_id}_"):
+            HITL_CANCELLED.add(key)
+            HITL_EVENTS[key].set()
+
+
+async def _hitl_wait(run_id: str, phase: int) -> bool:
+    """
+    Pause the pipeline and broadcast waiting_approval.
+    Returns True if the user approved, False if rerun was requested.
+    """
+    key = _hitl_key(run_id, phase)
+    evt = asyncio.Event()
+    HITL_EVENTS[key] = evt
+    await _emit(run_id, phase, "waiting_approval", 100, "Awaiting your approval to continue…")
+    await evt.wait()
+    HITL_EVENTS.pop(key, None)
+    if key in HITL_CANCELLED:
+        HITL_CANCELLED.discard(key)
+        return False
+    return True
+
+
 def _make_phase_runner(fn, run_id: str, loop):
     """
     Wrap a phase function so that when it runs in the thread-pool executor
@@ -270,6 +301,7 @@ async def _run_pipeline(run_id: str, prompt: str, style: str, duration: str, lan
         run_dir = result1.get("run_dir", _run_dir(run_id))
         RUNS[run_id]["run_dir"] = run_dir
         _db_upsert(run_id, {"status": "phase1_done", "run_dir": run_dir})
+        _save_meta(run_id, {**RUNS[run_id], "status": "phase1_done"})
         await _emit(run_id, 1, "done", 100, "Story & script complete ✓")
 
     except Exception as e:
@@ -279,6 +311,9 @@ async def _run_pipeline(run_id: str, prompt: str, style: str, duration: str, lan
         RUNS[run_id]["error"] = err
         _db_upsert(run_id, {"status": "error", "error": err})
         await _emit(run_id, 1, "error", 0, err)
+        return
+
+    if not await _hitl_wait(run_id, 1):
         return
 
     # ── Phase 2: Audio ───────────────────────────────────────
@@ -311,6 +346,9 @@ async def _run_pipeline(run_id: str, prompt: str, style: str, duration: str, lan
         RUNS[run_id]["error"] = err
         _db_upsert(run_id, {"status": "error", "error": err})
         await _emit(run_id, 2, "error", 0, err)
+        return
+
+    if not await _hitl_wait(run_id, 2):
         return
 
     # ── Phase 3: Video ───────────────────────────────────────
@@ -349,11 +387,17 @@ async def _run_pipeline(run_id: str, prompt: str, style: str, duration: str, lan
         await _emit(run_id, 3, "error", 0, err)
         return
 
+    if not await _hitl_wait(run_id, 3):
+        return
+
     # ── Phase 4: Finalize ────────────────────────────────────
     try:
         await _emit(run_id, 4, "running", 50, "Saving state snapshot…")
         from state_manager.snapshot import save_snapshot
-        save_snapshot(run_id, RUNS[run_id]["run_dir"])
+        from state_manager.history import save_version as _save_v0
+        _rdir = RUNS[run_id].get("run_dir", _run_dir(run_id))
+        save_snapshot(run_id, _rdir)
+        _save_v0(_rdir, label="Original")
 
         RUNS[run_id]["status"] = "done"
         _db_upsert(run_id, {
@@ -402,8 +446,9 @@ async def create_run(body: CreateRunRequest, background_tasks: BackgroundTasks):
     }
     _db_upsert(run_id, RUNS[run_id])
 
-    # Create run directory now so WebSocket can find it immediately
+    # Create run directory and persist metadata so server restarts can recover
     os.makedirs(_run_dir(run_id), exist_ok=True)
+    _save_meta(run_id, RUNS[run_id])
 
     background_tasks.add_task(
         _start_pipeline_bg, run_id, body.prompt, body.style, body.duration, body.language
@@ -422,10 +467,27 @@ async def ws_progress(ws: WebSocket, run_id: str):
     WS_CLIENTS.setdefault(run_id, []).append(ws)
     print(f"[WS] Client connected for run {run_id}  (total: {len(WS_CLIENTS[run_id])})")
 
-    # Send current status immediately so frontend knows if already done/running
-    cur = RUNS.get(run_id, {})
+    # Hydrate from disk/DB so reconnects after restart show correct status
+    cur = _hydrate_run(run_id)
     if cur:
-        await ws.send_json({"type": "state", "status": cur.get("status", "pending")})
+        # If run dir exists with output files, infer completed phases
+        rdir = _run_dir(run_id)
+        if cur.get("status") in ("unknown", "pending", "") and os.path.isdir(rdir):
+            if _load_json(os.path.join(rdir, "timing_manifest.json")):
+                cur["status"] = "phase2_done"
+            elif _load_json(os.path.join(rdir, "script.json")):
+                cur["status"] = "phase1_done"
+        await ws.send_json({"type": "state", "status": cur.get("status", "unknown")})
+
+    # Re-emit any live HITL approval waits so reconnecting clients see the correct state
+    for _hk in list(HITL_EVENTS.keys()):
+        if _hk.startswith(f"{run_id}_"):
+            _hphase = int(_hk.rsplit("_", 1)[-1])
+            await ws.send_json({
+                "phase": _hphase, "status": "waiting_approval",
+                "progress": 100, "message": "Awaiting your approval to continue…",
+                "ts": datetime.utcnow().isoformat(),
+            })
 
     try:
         while True:
@@ -824,9 +886,10 @@ async def get_version_assets(run_id: str, version: int):
 
 @app.post("/api/runs/{run_id}/revert/{version}")
 async def revert_version(run_id: str, version: int):
-    from state_manager.history import restore_version, get_version_meta
+    from state_manager.history import restore_version, get_version_meta, truncate_after
     rdir = _run_dir(run_id)
     restore_version(rdir, version)
+    truncate_after(rdir, version)   # delete all versions newer than this one
     meta = get_version_meta(rdir, version) or {}
     label = meta.get("label", f"v{version}")
     vp = meta.get("video_path", "")
@@ -848,6 +911,17 @@ async def revert_version(run_id: str, version: int):
     }
 
 
+@app.post("/api/runs/{run_id}/approve/{phase}")
+async def approve_phase(run_id: str, phase: int):
+    """Signal that the user approved a HITL checkpoint — resumes the waiting pipeline."""
+    key = _hitl_key(run_id, phase)
+    evt = HITL_EVENTS.get(key)
+    if evt:
+        evt.set()
+        return {"message": f"Phase {phase} approved — pipeline continuing"}
+    return {"message": "No pending approval found for this phase"}
+
+
 @app.post("/api/runs/{run_id}/rerun/{phase}")
 async def rerun_phase(run_id: str, phase: int, background_tasks: BackgroundTasks):
     if phase not in (1, 2, 3):
@@ -857,14 +931,18 @@ async def rerun_phase(run_id: str, phase: int, background_tasks: BackgroundTasks
     if run_id not in RUNS and not os.path.isdir(rdir):
         raise HTTPException(404, "Run not found")
 
-    run = RUNS.setdefault(run_id, {"run_id": run_id, "run_dir": rdir})
-    run["status"] = "running"
+    # Recover prompt/style/etc. from disk or MongoDB if server was restarted
+    run = _hydrate_run(run_id)
+    RUNS.setdefault(run_id, run)
+    RUNS[run_id]["status"] = "running"
+    RUNS[run_id]["run_dir"] = rdir
 
     prompt   = run.get("prompt", "")
     style    = run.get("style", "2D animated")
     duration = run.get("duration", "medium")
     language = run.get("language", "English")
 
+    _cancel_hitl_for_run(run_id)
     background_tasks.add_task(_rerun_phase_bg, run_id, phase, prompt, style, duration, language)
     return {"message": f"Re-running from phase {phase}", "run_id": run_id}
 
@@ -894,6 +972,8 @@ async def _rerun_phase_bg(run_id: str, from_phase: int, prompt: str, style: str,
             await _emit(run_id, 1, "error", 0, f"Phase 1 failed: {e}")
             RUNS[run_id]["status"] = "error"
             return
+        if not await _hitl_wait(run_id, 1):
+            return
 
     if from_phase <= 2:
         try:
@@ -913,6 +993,8 @@ async def _rerun_phase_bg(run_id: str, from_phase: int, prompt: str, style: str,
         except Exception as e:
             await _emit(run_id, 2, "error", 0, f"Phase 2 failed: {e}")
             RUNS[run_id]["status"] = "error"
+            return
+        if not await _hitl_wait(run_id, 2):
             return
 
     if from_phase <= 3:
@@ -939,6 +1021,8 @@ async def _rerun_phase_bg(run_id: str, from_phase: int, prompt: str, style: str,
             await _emit(run_id, 3, "error", 0, f"Phase 3 failed: {e}")
             RUNS[run_id]["status"] = "error"
             return
+        if not await _hitl_wait(run_id, 3):
+            return
 
     try:
         await _emit(run_id, 4, "running", 50, "Saving state snapshot…")
@@ -964,6 +1048,43 @@ def health():
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _save_meta(run_id: str, data: dict):
+    """Persist prompt/style/duration/language to disk so restarts can recover them."""
+    try:
+        path = os.path.join(_run_dir(run_id), "meta.json")
+        os.makedirs(_run_dir(run_id), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({k: data.get(k, "") for k in ("run_id", "prompt", "style", "duration", "language", "created_at", "status")}, f, indent=2)
+    except Exception as e:
+        print(f"[meta] Failed to save meta.json: {e}")
+
+
+def _hydrate_run(run_id: str) -> dict:
+    """
+    Ensure RUNS[run_id] exists with prompt/style/etc.
+    Priority: existing RUNS entry → MongoDB → disk meta.json → empty defaults.
+    """
+    existing = RUNS.get(run_id)
+    if existing and existing.get("prompt"):
+        return existing
+
+    # Try MongoDB
+    db_doc = _db_load(run_id)
+    if db_doc and db_doc.get("prompt"):
+        RUNS[run_id] = db_doc
+        return db_doc
+
+    # Try disk meta.json
+    meta = _load_json(os.path.join(_run_dir(run_id), "meta.json"))
+    if meta:
+        merged = {**(RUNS.get(run_id) or {}), **meta}
+        RUNS[run_id] = merged
+        return merged
+
+    # Nothing found — return whatever partial data we have
+    return RUNS.get(run_id, {"run_id": run_id})
+
 
 def _find_thumbnail(run_id: str) -> Optional[str]:
     """Return URL of the first available generated image for a run (for gallery cards)."""

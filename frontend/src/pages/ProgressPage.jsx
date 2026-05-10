@@ -177,7 +177,12 @@ function usePhaseProgress(runId) {
     fetch(`/api/runs/${runId}/rerun/${phaseId}`, { method: 'POST' }).catch(console.error)
   }
 
-  return { phases, done, simMode, retryPhase }
+  function approvePhase(phaseId) {
+    if (!runId || runId.startsWith('demo_')) return
+    fetch(`/api/runs/${runId}/approve/${phaseId}`, { method: 'POST' }).catch(console.error)
+  }
+
+  return { phases, done, simMode, retryPhase, approvePhase }
 }
 
 function runSimulation(setPhases, setDone) {
@@ -207,12 +212,13 @@ function runSimulation(setPhases, setDone) {
 }
 
 /* ── Phase card ─────────────────────────────────────────── */
-function PhaseCard({ phase, state, onRetry }) {
+function PhaseCard({ phase, state, onRetry, onApprove }) {
   const c = colorMap[phase.color]
-  const isDone    = state.status === 'done'
-  const isRunning = state.status === 'running'
-  const isWaiting = state.status === 'waiting'
-  const isError   = state.status === 'error'
+  const isDone            = state.status === 'done'
+  const isRunning         = state.status === 'running'
+  const isWaiting         = state.status === 'waiting'
+  const isError           = state.status === 'error'
+  const isApprovalPending = state.status === 'waiting_approval'
 
   return (
     <motion.div
@@ -221,23 +227,28 @@ function PhaseCard({ phase, state, onRetry }) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4 }}
       className={`rounded-2xl border-2 overflow-hidden transition-all duration-500
-        ${isDone    ? `${c.ring} ${c.bg} ${c.glow}` :
-          isRunning ? 'border-border-bright bg-surface' :
-          isError   ? 'border-red-500/60 bg-red-600/5' :
-                      'border-border bg-surface/50'}`}
+        ${isDone            ? `${c.ring} ${c.bg} ${c.glow}` :
+          isRunning         ? 'border-border-bright bg-surface' :
+          isApprovalPending ? 'border-amber-500/60 bg-amber-600/5 shadow-[0_0_20px_rgba(245,158,11,0.15)]' :
+          isError           ? 'border-red-500/60 bg-red-600/5' :
+                              'border-border bg-surface/50'}`}
     >
       <div className="flex items-center gap-4 p-5">
         <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 transition-all
-          ${isDone    ? `${c.bg} border border-current` :
-            isRunning ? 'bg-surface border border-border-bright' :
-            isError   ? 'bg-red-600/10 border border-red-500/40' :
-                        'bg-background border border-border'}`}>
+          ${isDone            ? `${c.bg} border border-current` :
+            isRunning         ? 'bg-surface border border-border-bright' :
+            isApprovalPending ? 'bg-amber-600/10 border border-amber-500/40' :
+            isError           ? 'bg-red-600/10 border border-red-500/40' :
+                                'bg-background border border-border'}`}>
           {isDone ? (
             <motion.span initial={{ scale: 0 }} animate={{ scale: 1 }}
               className={`material-symbols-outlined text-[24px] icon-fill ${c.text}`}>check_circle</motion.span>
           ) : isRunning ? (
             <motion.span animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: 'linear' }}
               className={`material-symbols-outlined text-[24px] ${c.text}`}>sync</motion.span>
+          ) : isApprovalPending ? (
+            <motion.span animate={{ opacity: [0.4, 1, 0.4] }} transition={{ duration: 1.5, repeat: Infinity }}
+              className="material-symbols-outlined text-[24px] text-amber-400">pause_circle</motion.span>
           ) : isError ? (
             <span className="material-symbols-outlined text-[24px] icon-fill text-red-400">error</span>
           ) : (
@@ -265,16 +276,46 @@ function PhaseCard({ phase, state, onRetry }) {
                 FAILED
               </motion.span>
             )}
+            {isApprovalPending && (
+              <motion.span initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }}
+                className="text-[10px] px-2 py-0.5 rounded-full bg-amber-600/20 text-amber-400 font-display font-bold border border-amber-600/30 animate-pulse">
+                AWAITING
+              </motion.span>
+            )}
           </div>
           <p className="text-white font-display font-semibold text-base mt-0.5">{phase.label}</p>
           <p className="text-slate-500 text-xs mt-0.5 truncate">{phase.sub}</p>
         </div>
 
-        {!isWaiting && !isError && (
+        {!isWaiting && !isError && !isApprovalPending && (
           <motion.span key={state.progress} initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
             className={`font-display font-black text-2xl ${isDone ? c.text : 'text-white'}`}>
             {state.progress}%
           </motion.span>
+        )}
+        {isApprovalPending && (
+          <div className="flex gap-1.5">
+            <motion.button
+              initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }}
+              whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+              onClick={onApprove}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600/20 border border-emerald-500/40
+                         text-emerald-400 font-display font-bold text-[11px] hover:bg-emerald-600/30 transition-colors"
+            >
+              <span className="material-symbols-outlined text-[14px]">check</span>
+              OK
+            </motion.button>
+            <motion.button
+              initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }}
+              whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+              onClick={onRetry}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-amber-600/20 border border-amber-500/40
+                         text-amber-400 font-display font-bold text-[11px] hover:bg-amber-600/30 transition-colors"
+            >
+              <span className="material-symbols-outlined text-[14px]">refresh</span>
+              RERUN
+            </motion.button>
+          </div>
         )}
         {isError && phase.id <= 3 && onRetry && (
           <motion.button
@@ -301,7 +342,7 @@ function PhaseCard({ phase, state, onRetry }) {
       )}
 
       <AnimatePresence>
-        {(isRunning || isDone) && state.log?.length > 0 && (
+        {(isRunning || isDone || isApprovalPending) && state.log?.length > 0 && (
           <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.3 }} className="overflow-hidden">
             <div className="mx-5 mb-4 p-3 bg-background rounded-xl border border-border font-mono text-[11px] space-y-1 max-h-24 overflow-y-auto">
@@ -583,7 +624,7 @@ function LivePreview({ runId, phases }) {
 export default function ProgressPage() {
   const { runId } = useParams()
   const navigate  = useNavigate()
-  const { phases, done, simMode, retryPhase } = usePhaseProgress(runId)
+  const { phases, done, simMode, retryPhase, approvePhase } = usePhaseProgress(runId)
 
   const activePhase = PHASES.find(p => phases[p.key]?.status === 'running')
 
@@ -636,7 +677,9 @@ export default function ProgressPage() {
             {/* LEFT — phase cards + done CTA */}
             <div className="space-y-4">
               {PHASES.map(phase => (
-                <PhaseCard key={phase.id} phase={phase} state={phases[phase.key]} onRetry={() => retryPhase(phase.id)} />
+                <PhaseCard key={phase.id} phase={phase} state={phases[phase.key]}
+                  onRetry={() => retryPhase(phase.id)}
+                  onApprove={() => approvePhase(phase.id)} />
               ))}
 
               <AnimatePresence>

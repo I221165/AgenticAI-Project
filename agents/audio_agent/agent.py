@@ -123,14 +123,32 @@ def generate_dialogue_audio(state: AudioState) -> Dict[str, Any]:
             emotion = line.get("emotion", "neutral").lower()
 
             # For ElevenLabs use the mapped voice_id; for others use the personality string
-            voice_param = (
-                voice_map.get(character_name, "Rachel")
-                if provider == 2
-                else next(
-                    (c.get("voice_personality", "Neutral") for c in handoff_json.get("voice_configs", []) if c.get("name") == character_name),
-                    "Neutral"
+            if provider == 2:
+                voice_param = voice_map.get(character_name, "Rachel")
+            else:
+                char_cfg = next(
+                    (c for c in handoff_json.get("voice_configs", []) if c.get("name") == character_name),
+                    {}
                 )
-            )
+                voice_param = char_cfg.get("voice_personality", "Neutral")
+
+                # If voice_personality has no explicit gender word, infer from visual_description.
+                # LLMs often write "British accent, determined" without saying "female" even for
+                # clearly female characters — this causes the voice mapper to pick a male voice.
+                _vp_lower = voice_param.lower()
+                _gender_words = ("female", "male", "woman", "man", "girl", "boy", "lady", "guy")
+                if not any(w in _vp_lower for w in _gender_words):
+                    _desc = char_cfg.get("visual_description", "").lower()
+                    _female_signals = ("she ", "her ", "woman", "female", "girl", "lady",
+                                       "actress", "mother", "daughter", "sister", "wife", "aunt",
+                                       "queen", "princess")
+                    _male_signals   = ("he ", "his ", " man", "male", " boy", " guy",
+                                       "actor", "father", "son", "brother", "husband", "uncle",
+                                       "king", "prince")
+                    if any(w in _desc for w in _female_signals):
+                        voice_param += " female"
+                    elif any(w in _desc for w in _male_signals):
+                        voice_param += " male"
 
             try:
                 completed_lines += 1

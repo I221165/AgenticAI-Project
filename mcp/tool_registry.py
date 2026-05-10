@@ -52,10 +52,12 @@ class ToolRegistry:
         """Registers all Phase 3 video/vision tools. Requires FFmpeg in PATH."""
         from .tools.vision_tools.image_gen_tool import ImageGenTool
         from .tools.video_tools.ffmpeg_tool import FFmpegTool
+        from .tools.video_tools.wan_video_tool import WanVideoTool
         from .tools.video_tools.compositor_tool import CompositorTool
         from .tools.video_tools.subtitle_tool import SubtitleTool
 
         cls.register(ImageGenTool())
         cls.register(FFmpegTool())
+        cls.register(WanVideoTool())
         cls.register(CompositorTool())
         cls.register(SubtitleTool())

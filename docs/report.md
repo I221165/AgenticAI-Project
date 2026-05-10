@@ -24,8 +24,10 @@
 11. [Testing](#11-testing)
 12. [Sample Output](#12-sample-output)
 13. [Setup and Execution](#13-setup-and-execution)
-14. [Conclusion](#14-conclusion)
-15. [Individual Contributions](#15-individual-contributions)
+14. [JSON Schema Design](#14-json-schema-design)
+15. [Challenges Faced](#15-challenges-faced)
+16. [Conclusion](#16-conclusion)
+17. [Individual Contributions](#17-individual-contributions)
 
 ---
 
@@ -495,7 +497,229 @@ cd frontend && npm run dev
 
 ---
 
-## 14. Conclusion
+## 14. JSON Schema Design
+
+StoryForge AI uses a set of versioned JSON files as the inter-phase communication contract. Each phase reads from the previous phase's output and writes its own artifact — no phase is coupled to another's internal implementation, only to the agreed schema.
+
+### 14.1 `story.json`
+
+Produced by Phase 1 `story_node`. Consumed by Phase 1 `character_node` and `script_node`, and stored as a reference for the Phase 5 edit agent.
+
+```json
+{
+  "title": "string",
+  "story_arc": {
+    "intro": "string",
+    "rising_action": "string",
+    "climax": "string",
+    "resolution": "string"
+  },
+  "themes": ["string"],
+  "estimated_duration_sec": 60,
+  "style": "string"
+}
+```
+
+### 14.2 `characters.json`
+
+Produced by Phase 1 `character_node`. Consumed by Phase 1 `script_node`, Phase 2 voice assignment, and Phase 5 edit agent.
+
+```json
+{
+  "characters": [
+    {
+      "name": "string",
+      "role": "string",
+      "age": "string",
+      "personality": "string",
+      "voice_personality": "string",
+      "visual_description": "string"
+    }
+  ]
+}
+```
+
+Key design decision: `voice_personality` is a free-text descriptor (e.g. `"deep authoritative male"`) that the TTS tool maps to a specific neural voice. This allows Phase 1 to describe voices in natural language without knowing the TTS provider's voice IDs.
+
+### 14.3 `script.json`
+
+Produced by Phase 1 `script_node`. Consumed by Phase 2 audio generation and Phase 3 image generation.
+
+```json
+{
+  "scenes": [
+    {
+      "scene_id": "scene_1",
+      "setting": "string",
+      "visual_description": "string",
+      "tone": "tense | happy | sad | mysterious | peaceful",
+      "duration_estimate_sec": 8,
+      "camera_work": "zoom_in | zoom_out | pan_right | pan_left | static",
+      "transition_to_next": "crossfade | flash | fade | wipe",
+      "dialogue_lines": [
+        {
+          "character_name": "string",
+          "text": "string",
+          "emotion": "string"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`visual_description` is the enriched image generation prompt built by `build_visual_prompt()` — it embeds the global style prefix, camera direction, character appearance descriptions, and lighting keywords so the image tool receives a complete, self-contained prompt.
+
+### 14.4 `timing_manifest.json`
+
+Produced by Phase 2 `serialize_node`. Consumed by Phase 3 `sync_audio` and `add_subtitles`, and by Phase 5 when regenerating audio.
+
+```json
+{
+  "entries": [
+    {
+      "scene_id": "scene_1",
+      "line_index": 0,
+      "character_name": "string",
+      "text": "string",
+      "emotion": "string",
+      "audio_file": "audio/scene_1/character_emotion_hash.mp3",
+      "start_ms": 0,
+      "end_ms": 2400
+    }
+  ],
+  "bgm_tracks": {
+    "scene_1": "audio/bgm/tense_01.mp3"
+  },
+  "full_audio_path": "audio/full_audio.mp3"
+}
+```
+
+`start_ms` / `end_ms` are cumulative across the entire video timeline, not per-scene. Phase 3 uses these to position subtitles and align the audio track to the video.
+
+### 14.5 `phase2_audio_handoff.json`
+
+The full Phase 2 state passed to Phase 3 and the edit agent. Extends the script with resolved voice configurations and audio file paths.
+
+```json
+{
+  "segments": [
+    {
+      "scene_id": "scene_1",
+      "tone": "tense",
+      "dialogue_lines": [{ "character_name": "string", "text": "string", "emotion": "string" }]
+    }
+  ],
+  "voice_configs": [
+    { "name": "string", "voice_personality": "string" }
+  ],
+  "language": "English",
+  "full_audio_path": "string",
+  "timing_manifest_path": "string"
+}
+```
+
+### 14.6 `phase3_video_handoff.json`
+
+The full Phase 3 state consumed by the edit agent and the backend when serving video assets.
+
+```json
+{
+  "scenes": [
+    {
+      "scene_id": "scene_1",
+      "visual_description": "string",
+      "camera_work": "string",
+      "transition_to_next": "string"
+    }
+  ],
+  "style": "string",
+  "subtitles_enabled": true,
+  "full_audio_path": "string",
+  "mixed_audio_dir": "string",
+  "timing_manifest_path": "string"
+}
+```
+
+### 14.7 Pydantic Validation
+
+All schemas are defined as Pydantic v2 models in `shared/schemas/state_schema.py`. Phase 1 validates every LLM output against `StoryOutput`, `CharacterRoster`, and `ScriptOutput` before passing downstream. Invalid outputs trigger a retry with a corrective prompt. This prevents malformed JSON from propagating silently through the pipeline.
+
+---
+
+## 15. Challenges Faced
+
+### 15.1 TTS Cache Serving Stale Audio After Voice Changes
+
+**Problem:** When a user changed a character's voice, the edit agent regenerated the audio but the old file was immediately returned from cache before the HTTP request was made. The TTS tool cached by filename derived from `MD5(character_name + emotion + text)`. Since the voice personality was not part of the hash, changing the voice did not invalidate the cache.
+
+**Fix:** Added `voice_personality` to the cache key: `MD5(character_name + emotion + text + voice_personality)`. This ensures any voice change produces a new filename and forces a fresh TTS call.
+
+---
+
+### 15.2 WebSocket Progress Bar Only Updating at End (Stale Closure)
+
+**Problem:** The Phase 5 live progress bar appeared frozen and only jumped to 100% when the edit finished. All intermediate WebSocket events were being received by the browser but the UI was not updating.
+
+**Root cause:** The `onmessage` handler in React's `useEffect` captured the initial value of `editActive` (which was `false`) via closure at mount time. The guard `if (!editActive) return` inside the handler was always true, silently discarding every event.
+
+**Fix:** Removed the guard condition entirely. Any non-done event unconditionally calls `setEditActive(true)`, so the closure stale value no longer matters.
+
+---
+
+### 15.3 Regenerated Images Looking Identical to Originals
+
+**Problem:** When the user asked to regenerate scene images, the new images looked visually identical to the old ones even though new HTTP requests were made to Pollinations.ai.
+
+**Root cause:** The image generation tool derived its seed from `abs(hash(scene_id)) % 9999` — a deterministic value that was the same on every call for a given scene. Pollinations.ai uses the seed parameter to produce a reproducible output, so the same seed always returned the same image.
+
+**Fix:** Added a `force_regen` flag to the image tool. When `True`, a `random.randint(1, 99999)` seed is used instead — one random seed per scene shared across all three frame types (wide/mid/close) to maintain intra-scene visual consistency while producing a genuinely new image.
+
+---
+
+### 15.4 Intent Classifier Targeting Wrong Character
+
+**Problem:** When the user said "change Naomi's voice", the LLM returned `target: "narrator"` (the character's role) instead of `"Naomi Nakahara"` (her name). The voice handler then failed to match any character and silently skipped the change.
+
+**Fix:** Added a two-pass character resolution in `_extract_character_target()`:
+1. First pass: match the target string against character names (full and partial word match)
+2. Second pass: if no name match, try matching against character roles
+
+Any non-scene-id target returned by the LLM now goes through this resolution before being used.
+
+---
+
+### 15.5 Full Phase 3 Re-running on Audio-Only Edits
+
+**Problem:** Every edit — including simple voice or BGM changes — triggered a full Phase 3 re-run: image generation, Ken Burns animation, scene composition, audio sync, and subtitle burn. This made audio-only edits take several minutes when only seconds were needed.
+
+**Fix:** Added an `audio_only=True` mode to `_recompose_video()`. When set, the function skips image gen / animate / compose and runs only `sync_audio` + `add_subtitles` on the existing `silent_video.mp4`. Audio edits (voice change, BGM change, script edit) now complete in seconds instead of minutes.
+
+---
+
+### 15.6 Version Snapshots Missing Audio and Video
+
+**Problem:** Early versions of `save_version()` only snapshotted JSON config files and images. When a user reverted to a previous version, the video and audio from that version were gone — only the metadata was restored, not the actual media.
+
+**Fix:** Extended `save_version()` to copy the full audio directory and the final MP4 into each version folder (`versions/vN/audio/` and `versions/vN/video/`). `restore_version()` was updated symmetrically to restore all asset types.
+
+---
+
+### 15.7 Edge-TTS Prosody Rejection for Non-English Voices
+
+**Problem:** Applying emotion-based rate/pitch adjustments (e.g. `rate=+12%`, `pitch=+20Hz`) via SSML caused Edge-TTS to throw an error for certain non-English neural voices (Urdu, Arabic) that do not support SSML prosody tags.
+
+**Fix:** Wrapped the TTS call in a try/except. On prosody failure, the tool retries with `rate=+0%` and `pitch=+0Hz` (flat prosody), preserving the voice and text while silently dropping the emotion adjustment.
+
+---
+
+### 15.8 Script Edit Not Actually Rewriting Dialogue
+
+**Problem:** The `script_edit` handler tagged scenes with a `_edit_instruction` marker but never called the LLM to rewrite the text. The old dialogue was re-synthesised with TTS unchanged, giving the appearance of an edit with no real effect.
+
+**Fix:** Rewrote the handler to call `TextGeneratorTool` with the scene's existing dialogue and the user's instruction as context, parse the returned JSON array directly, and replace `dialogue_lines` in both `script.json` and `phase2_audio_handoff.json` before re-running targeted TTS.
+
+---
 
 StoryForge AI demonstrates a complete agentic AI system built on modern LLM orchestration primitives. Key engineering achievements:
 
@@ -511,7 +735,7 @@ The system successfully generates animated short films from a single prompt and 
 
 ---
 
-## 15. Individual Contributions
+## 17. Individual Contributions
 
 | Phase | Component | Contributor |
 |---|---|---|

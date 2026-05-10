@@ -30,11 +30,35 @@ class ImageGenTool(BaseAgenticTool):
 
     BASE_URL = "https://image.pollinations.ai/prompt"
 
-    # Cinematic angle modifier added to each frame's prompt
+    # Cinematic angle modifier prepended to each frame's prompt
     FRAME_MODIFIERS = {
-        "wide":  "wide establishing shot, full environment visible, cinematic wide angle",
-        "mid":   "medium shot, characters in foreground, background environment visible",
-        "close": "close-up shot, expressive faces, emotional detail, shallow depth of field",
+        "wide": (
+            "extreme wide establishing shot, sweeping cinematic panorama, "
+            "full environment and atmosphere visible, camera positioned low and far to emphasize scale, "
+            "ultra-wide angle lens (14-24mm equivalent), deep focus from foreground to horizon, "
+            "environment dwarfs characters to establish mood and world, "
+            "volumetric light rays, atmospheric depth haze, rule-of-thirds composition, "
+            "epic scope and grandeur, landscape dominates frame"
+        ),
+        "mid": (
+            "medium two-shot or medium full shot, characters framed from waist up, "
+            "35-50mm equivalent lens giving natural perspective with no distortion, "
+            "characters occupy center-left or center-right third of frame, "
+            "background environment soft-focused but still legible for spatial context, "
+            "body language and gesture clearly readable, "
+            "balanced negative space communicates relationship and power dynamic, "
+            "cinematic depth of field with characters sharp against painterly background"
+        ),
+        "close": (
+            "tight close-up portrait shot, face fills frame from chin to forehead, "
+            "85-135mm equivalent telephoto lens with beautiful bokeh background blur, "
+            "razor-sharp focus on eyes to convey inner emotion, "
+            "catch-light in eyes, subtle skin texture or material texture visible, "
+            "shallow depth of field isolates subject from background completely, "
+            "dramatic side-lighting or Rembrandt lighting sculpts facial features, "
+            "micro-expressions readable, intense emotional intimacy, "
+            "color grade reinforces character's emotional state in this moment"
+        ),
     }
 
     def execute(

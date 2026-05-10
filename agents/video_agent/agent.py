@@ -127,19 +127,30 @@ def generate_scene_images(state: VideoState) -> Dict[str, Any]:
 
 
 def animate_frames(state: VideoState) -> Dict[str, Any]:
-    """Node: Animate each keyframe image with Ken Burns effect into a video clip."""
+    """
+    Node: Animate each scene's keyframe images into video clips.
+
+    Strategy per scene:
+      1. Try Wan I2V (DashScope) on the wide/first image — produces a real
+         AI-animated clip with natural camera motion.
+      2. If Wan fails or is not configured → Ken Burns FFmpeg on all 3
+         frames (wide/mid/close), same as before.
+
+    Downstream nodes (compose_scenes, sync_audio, subtitles) are unchanged.
+    """
     if state.get("error"):
         return {}
 
-    ffmpeg_tool = ToolRegistry.get_tool("ffmpeg_ken_burns")
+    ffmpeg_tool  = ToolRegistry.get_tool("ffmpeg_ken_burns")
+    wan_tool     = ToolRegistry.get_tool("wan_video")
+    use_wan      = bool(os.getenv("DASHSCOPE_API_KEY", "").strip())
+
     run_dir = state["run_dir"]
     fps = state.get("fps", 24)
     scenes_map = {s["scene_id"]: s for s in state["handoff_json"].get("scenes", [])}
     clips_dir = os.path.join(run_dir, "clips")
     os.makedirs(clips_dir, exist_ok=True)
 
-    # Derive target duration per scene from actual TTS audio, not the LLM estimate.
-    # This ensures the visuals don't advance to the next scene while audio still plays.
     scene_audio_durations = _compute_scene_durations(
         state.get("timing_manifest", []),
         scenes_map,
@@ -147,36 +158,58 @@ def animate_frames(state: VideoState) -> Dict[str, Any]:
 
     scene_clip_groups: Dict[str, List[str]] = {}
     all_image_groups = state.get("scene_image_groups", {})
-    total_clips = sum(len(v) for v in all_image_groups.values())
-    animated = 0
-    _report(3, 55, f"Animating {total_clips} clips with Ken Burns effect…")
+    total_scenes = len(all_image_groups)
+    done = 0
+    _report(3, 55, f"Animating {total_scenes} scenes {'(Wan I2V + Ken Burns fallback)' if use_wan else '(Ken Burns)'}…")
 
     for scene_id, image_paths in all_image_groups.items():
+        if not image_paths:
+            continue
+
         scene = scenes_map.get(scene_id, {})
         n = len(image_paths)
         target_duration = scene_audio_durations.get(
             scene_id,
             max(float(scene.get("duration_estimate_sec", 6)), _MIN_FRAME_DURATION * n),
         )
-        # Solve for per-frame duration so the composed scene hits target_duration exactly.
-        # Compositor applies (n-1) intra-transitions of _INTRA_TRANSITION_DUR each:
-        #   total_scene = n * frame_dur - (n-1) * _INTRA_TRANSITION_DUR = target
-        #   => frame_dur = (target + (n-1) * _INTRA_TRANSITION_DUR) / n
+        camera_work = scene.get("camera_work", "zoom_in")
+        done += 1
+        anim_prog = 55 + int(22 * done / max(total_scenes, 1))
+
+        # ── Try Wan I2V on the wide (first) image ───────────────────────────
+        if use_wan:
+            wide_img = image_paths[0]
+            wan_clip = os.path.join(clips_dir, f"{scene_id}_wan.mp4")
+            wan_prompt = _build_wan_prompt(scene)
+            _report(3, anim_prog, f"Wan I2V {done}/{total_scenes}: {scene_id}…")
+            try:
+                path = wan_tool.execute(
+                    image_path=wide_img,
+                    output_path=wan_clip,
+                    prompt=wan_prompt,
+                    duration=target_duration,
+                    resolution="720P",
+                    camera_work=camera_work,
+                    fps=fps,
+                    force_fallback=False,
+                )
+                scene_clip_groups[scene_id] = [path]
+                print(f"[VideoAgent] Wan I2V OK: {scene_id}")
+                continue
+            except Exception as e:
+                print(f"[VideoAgent] Wan I2V failed for {scene_id}: {e} — falling back to Ken Burns")
+
+        # ── Ken Burns fallback: wide/mid/close ───────────────────────────────
         frame_duration = max(
             (target_duration + (n - 1) * _INTRA_TRANSITION_DUR) / n,
             _MIN_FRAME_DURATION,
         )
-        camera_work = scene.get("camera_work", "zoom_in")
         clip_paths: List[str] = []
-
         for i, img_path in enumerate(image_paths):
             frame_type = _FRAME_TYPES[i] if i < len(_FRAME_TYPES) else "wide"
             cam = _FRAME_CAMERA_WORK[frame_type](camera_work)
             out_clip = os.path.join(clips_dir, f"{scene_id}_{frame_type}.mp4")
-            animated += 1
-            anim_prog = 55 + int(22 * animated / max(total_clips, 1))
-            _report(3, anim_prog, f"Ken Burns {animated}/{total_clips}: {scene_id} [{frame_type}]")
-
+            _report(3, anim_prog, f"Ken Burns {done}/{total_scenes}: {scene_id} [{frame_type}]")
             try:
                 path = ffmpeg_tool.execute(
                     image_path=img_path,
@@ -193,6 +226,26 @@ def animate_frames(state: VideoState) -> Dict[str, Any]:
             scene_clip_groups[scene_id] = clip_paths
 
     return {"scene_clip_groups": scene_clip_groups}
+
+
+def _build_wan_prompt(scene: Dict[str, Any]) -> str:
+    """Build a motion prompt for Wan I2V from the scene's handoff data."""
+    desc    = scene.get("visual_description", "") or scene.get("description", "")
+    mood    = scene.get("mood", "")
+    cam     = scene.get("camera_work", "zoom_in")
+    cam_map = {
+        "zoom_in":   "slow cinematic push-in toward the subject",
+        "zoom_out":  "slow cinematic pull-back revealing the environment",
+        "pan_right": "smooth horizontal pan right across the scene",
+        "pan_left":  "smooth horizontal pan left across the scene",
+        "static":    "locked-off static camera, subtle atmospheric movement",
+    }
+    cam_desc = cam_map.get(cam, "cinematic camera movement")
+    return (
+        f"{desc}. {cam_desc}. "
+        f"Mood: {mood}. Natural motion, atmospheric lighting, film grain, "
+        f"24fps, cinematic depth of field, professional cinematography."
+    )[:800]
 
 
 def compose_scenes(state: VideoState) -> Dict[str, Any]:

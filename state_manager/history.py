@@ -35,7 +35,7 @@ def _next_version(run_dir: str) -> int:
         int(d[1:]) for d in os.listdir(vdir)
         if d.startswith("v") and d[1:].isdigit()
     ]
-    return (max(existing) + 1) if existing else 1
+    return (max(existing) + 1) if existing else 0
 
 
 def _find_mp4(run_dir: str) -> Optional[str]:
@@ -141,6 +141,15 @@ def get_version_meta(run_dir: str, version: int) -> Optional[Dict[str, Any]]:
         return None
     with open(meta_path) as f:
         return json.load(f)
+
+
+def truncate_after(run_dir: str, version: int):
+    """Delete all snapshots with version number > version (called on revert to prune forward history)."""
+    vdir = _versions_dir(run_dir)
+    for d in os.listdir(vdir):
+        if d.startswith("v") and d[1:].isdigit():
+            if int(d[1:]) > version:
+                shutil.rmtree(os.path.join(vdir, d), ignore_errors=True)
 
 
 def restore_version(run_dir: str, version: int):

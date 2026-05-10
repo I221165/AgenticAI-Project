@@ -25,6 +25,7 @@ edge-tts>=7.0.0     # Free Microsoft Neural TTS (high quality) ⭐ RECOMMENDED
 Pillow>=10.0.0          # Image manipulation (brightness, filters, sepia/noir)
 numpy>=1.26.0           # Pixel-level filter math
 requests>=2.31.0        # Pollinations.ai HTTP image generation
+dashscope>=1.14.0       # Alibaba Wan I2V / T2V / CosyVoice (DashScope SDK)
 
 # === Testing ===
 pytest>=8.0.0

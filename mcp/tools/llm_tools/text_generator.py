@@ -23,8 +23,13 @@ class TextGeneratorTool(BaseAgenticTool):
 
     def execute(self, system_prompt: str, user_prompt: str, model_name: str = "llama3", provider: int = 2) -> str:
         if provider == 1:
-            # Local version via Ollama
-            llm = ChatOllama(model=model_name, temperature=0.7)
+            ollama_model = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+            print(f"[TextGenerator] Ollama → {ollama_model}")
+            try:
+                from langchain_ollama import ChatOllama as ChatOllamaNew
+                llm = ChatOllamaNew(model=ollama_model, temperature=0.7)
+            except ImportError:
+                llm = ChatOllama(model=ollama_model, temperature=0.7)
         elif provider == 2:
             # Cloud version via Groq — use 70B for creative tasks, 8B if caller explicitly requests fast
             groq_model = model_name if model_name not in ("llama3", "llama-3.1-8b-instant") else self.GROQ_CREATIVE_MODEL

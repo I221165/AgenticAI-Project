@@ -170,10 +170,14 @@ export default function StudioPage() {
   }, [viewingVersion, runId])
 
   // Determine what to actually display — live data or snapshot
-  const displayImages     = viewingVersion ? (versionAssets?.images || [])                         : images
-  const displayCharacters = viewingVersion ? (versionAssets?.characters?.characters || [])          : characters
-  const displayScenes     = viewingVersion ? (versionAssets?.script?.scenes || [])                  : scenes
-  const displayVideoUrl   = viewingVersion ? (versionAssets?.video_url || null)                     : videoUrl
+  const displayImages     = viewingVersion ? (versionAssets?.images || [])                : images
+  const displayCharacters = viewingVersion ? (versionAssets?.characters?.characters || []) : characters
+  const displayScenes     = viewingVersion ? (versionAssets?.script?.scenes || [])         : scenes
+  // Cache-bust the live video URL so the browser re-fetches from disk after every edit/refresh.
+  // Version snapshot URLs are content-addressable (different path each time) so they don't need it.
+  const displayVideoUrl   = viewingVersion
+    ? (versionAssets?.video_url || null)
+    : (videoUrl ? `${videoUrl}?v=${refreshKey}` : null)
 
   // WebSocket — listen for Phase 5 (and sub-phase) progress during edits
   useEffect(() => {
@@ -256,8 +260,15 @@ export default function StudioPage() {
             afterLabel:  `After (v${vNum})`,
           })
         }
-        setViewingVersion(null)   // return to live view after revert
-        setRefreshKey(k => k + 1)
+        // Optimistically prune pills newer than the restored version immediately
+        // so the UI reflects the change before the re-fetch completes
+        setVersions(prev =>
+          prev
+            .filter(v => v.v <= vNum)
+            .map((v, i) => ({ ...v, current: i === 0 }))
+        )
+        setViewingVersion(null)
+        setRefreshKey(k => k + 1)  // re-fetch to confirm server state
       }
     } catch {
       setOptimisticMsgs(prev => [...prev, {

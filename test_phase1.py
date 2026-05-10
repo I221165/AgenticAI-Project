@@ -14,10 +14,12 @@ def main():
     # Initialize tools
     ToolRegistry.register_core_tools()
     
+    ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:1b")
+
     print("\n--- Provider Selection ---")
-    print("1. Local (Ollama - Llama 3)")
-    print("2. Cloud (Groq - Llama 3.1)")
-    
+    print(f"1. Local  (Ollama - {ollama_model})")
+    print("2. Cloud  (Groq   - llama-3.3-70b-versatile)")
+
     while True:
         try:
             provider_choice = int(input("Select your provider (1 or 2): ").strip())
@@ -28,12 +30,15 @@ def main():
                 print("Please enter 1 or 2.")
         except ValueError:
             print("Invalid input. Please enter 1 or 2.")
-            
-    if provider == 2:
+
+    if provider == 1:
+        print(f"\n[Ollama] Using model: {ollama_model}")
+        print("[NOTE] Small models (1b) may produce shorter or simpler stories.")
+        print("       Make sure Ollama is running:  ollama serve")
+    elif provider == 2:
         groq_key = os.getenv("GROQ_API_KEY")
         if not groq_key or groq_key == "your_groq_api_key_here":
-            print("\n[WARNING] You selected Cloud (Groq) but GROQ_API_KEY is not set properly in .env!")
-            print("The agent will likely fail unless your environment provides the key.")
+            print("\n[WARNING] GROQ_API_KEY is not set in .env — cloud run will fail.")
             
     print("\n--- Story Prompt ---")
     prompt = input("Enter a prompt for the story (e.g., 'A young astronaut discovers a hidden ocean on Mars'):\n> ").strip()

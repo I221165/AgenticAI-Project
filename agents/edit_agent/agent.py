@@ -176,8 +176,14 @@ def _get_style(run_dir: str) -> str:
     return _load(p).get("style", "2D animated") if os.path.exists(p) else "2D animated"
 
 
-def _recompose_video(run_dir: str) -> str:
-    """After audio/image changes, recompose the video."""
+def _recompose_video(run_dir: str, audio_only: bool = False) -> str:
+    """Recompose the final video.
+
+    audio_only=True  — images/clips unchanged; skip generate→animate→compose and
+                       run only sync_audio + add_subtitles on the existing silent_video.mp4.
+                       Used for bgm_change, voice_change, script_edit — saves minutes.
+    audio_only=False — full Phase 3 re-run (images or structure changed).
+    """
     handoff_path = os.path.join(run_dir, "phase3_video_handoff.json")
     if not os.path.exists(handoff_path):
         return ""
@@ -185,9 +191,44 @@ def _recompose_video(run_dir: str) -> str:
     timing_path = os.path.join(run_dir, "timing_manifest.json")
     timing_data = _load(timing_path) if os.path.exists(timing_path) else {}
     timing_entries = timing_data.get("entries", [])
-    from agents.video_agent.agent import run_phase3
-    result = run_phase3(handoff, timing_entries, run_dir)
-    return result.get("final_video_path", "")
+
+    if audio_only:
+        silent_path = os.path.join(run_dir, "video", "silent_video.mp4")
+        if not os.path.exists(silent_path):
+            # No silent video yet — fall back to full recompose
+            audio_only = False
+        else:
+            from agents.video_agent.agent import sync_audio, add_subtitles, VideoState
+            state: VideoState = {
+                "handoff_json":      handoff,
+                "timing_manifest":   timing_entries,
+                "run_dir":           run_dir,
+                "fps":               24,
+                "scene_image_groups": {},
+                "scene_clip_groups": {},
+                "scene_order":       [],
+                "silent_video_path": silent_path,
+                "audio_video_path":  "",
+                "final_video_path":  "",
+                "error":             "",
+            }
+            state = {**state, **sync_audio(state)}
+            if state.get("error"):
+                print(f"[EditAgent] Audio sync failed: {state['error']}, falling back to full recompose")
+                audio_only = False
+            else:
+                state = {**state, **add_subtitles(state)}
+                final = state.get("final_video_path", "")
+                if final and os.path.exists(final):
+                    print(f"[EditAgent] Audio-only recompose done → {final}")
+                    return final
+                audio_only = False  # fallback if subtitles failed
+
+    if not audio_only:
+        from agents.video_agent.agent import run_phase3
+        result = run_phase3(handoff, timing_entries, run_dir)
+        return result.get("final_video_path", "")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +237,7 @@ def _recompose_video(run_dir: str) -> str:
 
 def _reregen_tts_for_entries(run_dir: str, handoff: dict, entries: list, filter_fn) -> None:
     """Re-run TTS only for entries where filter_fn(entry) is True. Updates entries in-place."""
-    from mcp.registry import ToolRegistry
+    from mcp.tool_registry import ToolRegistry
     from agents.audio_agent.agent import _EMOTION_GAP_MS, _DEFAULT_GAP_MS
     tts_tool = ToolRegistry.get_tool("tts_generator")
     language = handoff.get("language", "English")
@@ -268,7 +309,8 @@ def _remix_with_entries(run_dir: str, handoff: dict, entries: list, bgm_tracks: 
     state = {**state, **mix_scene_audio(state)}
     state = {**state, **assemble_full_audio(state)}
     serialize_node(state)
-    return _recompose_video(run_dir)
+    # Images and video structure are unchanged — only re-sync audio + subtitles
+    return _recompose_video(run_dir, audio_only=True)
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +367,16 @@ def _edit_voice(run_dir: str, target: str, value: str) -> dict:
 
 
 def _edit_scene_regen(run_dir: str, target: str, value: str) -> dict:
-    """Re-generate images for the target scene(s) then recompose video."""
+    """Re-generate images for the target scene(s) then recompose video.
+
+    Calls the image tool directly with force_regen=True so:
+    - The file cache is bypassed (no stale image returned)
+    - A fresh random seed is used (Pollinations generates a visually new image,
+      not the same pixels as before — fixes the "looks cached" problem)
+    """
+    import random as _random
+    from mcp.tool_registry import ToolRegistry
+
     handoff_path = os.path.join(run_dir, "phase3_video_handoff.json")
     if not os.path.exists(handoff_path):
         raise FileNotFoundError("phase3_video_handoff.json not found")
@@ -338,24 +389,36 @@ def _edit_scene_regen(run_dir: str, target: str, value: str) -> dict:
         _save(handoff_path, handoff)
 
     img_dir = os.path.join(run_dir, "images")
-    if target != "all":
-        # Images are stored flat: images/scene_1_wide.png — delete only target scene files
-        import glob as _glob
-        for f in _glob.glob(os.path.join(img_dir, f"{target}_*.png")) + \
-                 _glob.glob(os.path.join(img_dir, f"{target}_*.jpg")):
-            os.remove(f)
-            print(f"[EditAgent] Deleted {os.path.basename(f)}")
+    os.makedirs(img_dir, exist_ok=True)
+
+    # Determine which scenes need new images
+    all_scenes = handoff.get("scenes", [])
+    if target == "all":
+        target_scenes = all_scenes
     else:
-        if os.path.isdir(img_dir):
-            shutil.rmtree(img_dir)
+        target_scenes = [s for s in all_scenes if s.get("scene_id") == target]
 
-    timing_path = os.path.join(run_dir, "timing_manifest.json")
-    timing_data = _load(timing_path) if os.path.exists(timing_path) else {}
-    timing_entries = timing_data.get("entries", [])
+    img_tool = ToolRegistry.get_tool("image_generator")
 
-    from agents.video_agent.agent import run_phase3
-    result = run_phase3(handoff, timing_entries, run_dir)
-    return {"new_video": result.get("final_video_path")}
+    for scene in target_scenes:
+        scene_id = scene.get("scene_id", "")
+        prompt = scene.get("visual_description", "")
+        # One fresh seed shared across wide/mid/close so all 3 frames look consistent
+        fresh_seed = _random.randint(1, 99999)
+        for frame_type in ("wide", "mid", "close"):
+            try:
+                img_tool.execute(
+                    prompt=prompt,
+                    scene_id=scene_id,
+                    frame_type=frame_type,
+                    output_dir=img_dir,
+                    seed=fresh_seed,
+                    force_regen=True,
+                )
+            except Exception as e:
+                print(f"[EditAgent] Image regen failed {scene_id}/{frame_type}: {e}")
+
+    return {"new_video": _recompose_video(run_dir)}
 
 
 def _edit_style(run_dir: str, target: str, value: str) -> dict:
@@ -371,14 +434,69 @@ def _edit_style(run_dir: str, target: str, value: str) -> dict:
     return _edit_scene_regen(run_dir, "all", "")
 
 
+_KNOWN_BGM_TONES = [
+    "happy", "joyful", "peaceful", "sad", "melancholy", "tense",
+    "mysterious", "dark", "epic", "heroic", "romantic", "action", "neutral",
+]
+
+
+def _extract_bgm_tone(value: str) -> str:
+    """Map natural-language mood description to a known BGM tone keyword.
+
+    Fast path: if the user typed an exact tone keyword, return immediately.
+    Otherwise ask Groq (llama-3.1-8b-instant) to pick the best match.
+    Falls back to 'neutral' if the LLM call fails.
+    """
+    low = value.lower().strip()
+
+    # Fast path — exact keyword already present
+    for tone in _KNOWN_BGM_TONES:
+        if tone in low:
+            print(f"[BGM Tone] Fast-path match: '{value}' → '{tone}'")
+            return tone
+
+    # LLM path — let Groq semantically pick the best tone
+    try:
+        from mcp.tools.llm_tools.text_generator import TextGeneratorTool
+        llm = TextGeneratorTool()
+        tones_list = ", ".join(_KNOWN_BGM_TONES)
+        response = llm.execute(
+            system_prompt=(
+                f"You are a music mood classifier. "
+                f"Given a user description, pick the single best matching tone from this list: {tones_list}. "
+                f"Reply with ONLY that one word, nothing else."
+            ),
+            user_prompt=value,
+            model_name="llama-3.1-8b-instant",
+            provider=2,
+        )
+        picked = response.strip().lower().split()[0]  # first word only, lowercase
+        # Strip punctuation
+        picked = picked.strip(".,!?\"'")
+        if picked in _KNOWN_BGM_TONES:
+            print(f"[BGM Tone] LLM mapped: '{value}' → '{picked}'")
+            return picked
+        # LLM returned something not in the list — try substring match as safety net
+        for tone in _KNOWN_BGM_TONES:
+            if tone in picked:
+                print(f"[BGM Tone] LLM partial match: '{value}' → '{tone}'")
+                return tone
+        print(f"[BGM Tone] LLM returned unrecognised '{picked}', defaulting to neutral")
+    except Exception as e:
+        print(f"[BGM Tone] LLM call failed ({e}), defaulting to neutral")
+
+    return "neutral"
+
+
 def _edit_bgm(run_dir: str, target: str, value: str) -> dict:
     """Re-select BGM with new tone and remix — no TTS re-run, dialogue audio untouched."""
+    tone = _extract_bgm_tone(value)
     handoff_path = os.path.join(run_dir, "phase2_audio_handoff.json")
     handoff = _load(handoff_path)
     for scene in handoff.get("segments", []):
         if scene.get("scene_id") == target or target == "all":
-            scene["tone"] = value
-            print(f"[EditAgent] BGM tone → {scene['scene_id']}: {value}")
+            scene["tone"] = tone
+            print(f"[EditAgent] BGM tone → {scene['scene_id']}: '{value}' → '{tone}'")
     _save(handoff_path, handoff)
 
     # Load existing dialogue timing — no need to regenerate any speech
@@ -409,9 +527,7 @@ def _edit_script(run_dir: str, target: str, value: str) -> dict:
     # Call LLM to rewrite dialogue for each target scene
     try:
         from mcp.tools.llm_tools.text_generator import TextGeneratorTool
-        from mcp.tools.llm_tools.json_structurer import JsonStructurerTool
         llm = TextGeneratorTool()
-        structurer = JsonStructurerTool()
 
         char_names = [c.get("name", "") for c in (
             characters.get("characters", characters) if isinstance(characters, dict) else characters
@@ -422,36 +538,36 @@ def _edit_script(run_dir: str, target: str, value: str) -> dict:
             existing_text = "\n".join(
                 f'{l["character_name"]}: {l["text"]}' for l in existing_lines
             )
-            prompt = (
-                f"You are rewriting dialogue for an animated short film.\n\n"
-                f"Story context: {json.dumps(story.get('story_arc', story), ensure_ascii=False)[:600]}\n"
-                f"Scene setting: {scene.get('setting', '')}\n"
-                f"Characters available: {', '.join(char_names)}\n"
-                f"Current dialogue:\n{existing_text}\n\n"
-                f"Edit instruction: {value}\n\n"
-                f"Rewrite the dialogue following the instruction. Keep the same characters. "
-                f"Return ONLY a JSON array of objects with keys: character_name, text, emotion.\n"
-                f'Example: [{{"character_name": "Alex", "text": "Hello.", "emotion": "happy"}}]'
+            raw = llm.execute(
+                system_prompt=(
+                    "You are a screenplay editor for an animated short film. "
+                    "Return ONLY a raw JSON array — no markdown, no explanation, no code fences."
+                ),
+                user_prompt=(
+                    f"Story context: {json.dumps(story.get('story_arc', story), ensure_ascii=False)[:600]}\n"
+                    f"Scene setting: {scene.get('setting', '')}\n"
+                    f"Characters: {', '.join(char_names)}\n"
+                    f"Current dialogue:\n{existing_text}\n\n"
+                    f"Edit instruction: {value}\n\n"
+                    f"Rewrite the dialogue following the instruction. Keep the same characters.\n"
+                    f'Output format: [{{"character_name": "Name", "text": "Line.", "emotion": "happy"}}]'
+                ),
+                provider=2,
             )
-            raw = llm.execute(prompt=prompt)
-            new_lines = structurer.execute(
-                raw_text=raw,
-                schema={
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "character_name": {"type": "string"},
-                            "text": {"type": "string"},
-                            "emotion": {"type": "string"},
-                        },
-                        "required": ["character_name", "text", "emotion"],
-                    },
-                },
-            )
-            if new_lines and isinstance(new_lines, list):
-                scene["dialogue_lines"] = new_lines
-                print(f"[EditAgent] script_edit rewrote {len(new_lines)} lines for {scene['scene_id']}")
+            # Parse the JSON array directly — JsonStructurerTool only handles fixed Pydantic schemas
+            cleaned = re.sub(r"^```json\s*|^```\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE)
+            match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+            if match:
+                new_lines = json.loads(match.group())
+                if new_lines and isinstance(new_lines, list):
+                    # Validate each entry has the required keys
+                    valid = [
+                        l for l in new_lines
+                        if isinstance(l, dict) and "character_name" in l and "text" in l
+                    ]
+                    if valid:
+                        scene["dialogue_lines"] = valid
+                        print(f"[EditAgent] script_edit rewrote {len(valid)} lines for {scene['scene_id']}")
 
     except Exception as e:
         print(f"[EditAgent] LLM rewrite failed ({e}), keeping original dialogue")
@@ -522,8 +638,8 @@ def _edit_subtitle_remove(run_dir: str, target: str, value: str) -> dict:
     _save(handoff_path, handoff)
     print("[EditAgent] Subtitles disabled")
 
-    # Recompose video without subtitle overlay
-    return {"new_video": _recompose_video(run_dir), "message": "Subtitles removed."}
+    # Only the subtitle burn step changes — reuse existing silent+audio video
+    return {"new_video": _recompose_video(run_dir, audio_only=True), "message": "Subtitles removed."}
 
 
 def _edit_speed_change(run_dir: str, target: str, value: str) -> dict:
